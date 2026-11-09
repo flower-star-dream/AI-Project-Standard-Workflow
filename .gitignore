@@ -1,0 +1,4 @@
+# 生成的检查报告（由 aipsw gate 产出，不入库）
+reports/
+__pycache__/
+*.pyc
