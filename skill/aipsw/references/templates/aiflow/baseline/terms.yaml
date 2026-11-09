@@ -1,0 +1,30 @@
+# 术语表 —— 全项目唯一来源，禁止在其他文档重复定义
+#
+# 【格式说明】本文件示例用 YAML；可换成任意机器可读格式（TOML / JSON / Markdown 表格）。
+#   只需满足三项：① 唯一来源 ② 可版本化 ③ 可脚本校验。格式不同不构成不合规（规范附录 L）。
+# 【填写说明】status: confirmed（确认）| pending（待定）| deprecated（已废弃，移出检索）
+#   authority: A（官方/正式发布）| B（团队确认）| C（AI 推断/参考）
+#   not_confused_with 用来记录易混词，脚本比对时一并查。
+
+meta:
+  version: v0.1
+  status: draft            # 本人核实后改为 confirmed
+  updated: <YYYY-MM-DD>
+  owner: <待确认>
+
+terms:
+  # ---------- 示例（填完后删除本段） ----------
+  # example_term:
+  #   zh: 示例术语
+  #   en: ExampleTerm
+  #   definition: 一句话定义，必须可判定（能被反例区分）
+  #   not_confused_with: [易混词1, 易混词2]
+  #   status: confirmed
+  #   authority: B
+  #
+  # ---------- 从这里开始填 ----------
+  <term_key>:
+    zh: <中文名>
+    definition: <一句话定义，必须可判定>
+    status: confirmed
+    authority: B

@@ -1,0 +1,24 @@
+# 评测集 —— 换模型 / 改提示词 / 调检索参数前先跑一遍，低于基线不许发布
+#
+# 【规模要求】团队模式（规范阶段 0）：≥10 个典型任务 + ≥5 个 bad case + ≥3 个不合格样例
+#            个人模式（附录 E.2）：5 个典型任务 + 3 个坑
+# 【原则】不合格样例要「明确知道它不合格」，否则门禁形同虚设。
+
+meta:
+  version: v0.1
+  baseline_score: 0.80      # 当前基线，低于此值阻断发布
+  updated: <YYYY-MM-DD>
+
+cases:
+  - id: TC-01
+    type: normal              # normal | edge | negative
+    task: <典型任务描述>
+    must_include: [<必须出现的要素>]
+    must_not: [<禁止出现的做法>]
+    weight: 1.0
+
+  - id: BAD-01
+    type: negative
+    task: <已知会被做错的问法>
+    must_not: [<错误做法>]
+    expected: fail_on_purpose   # 这条本来就应该失败，用来确认判定标准没漂

@@ -1,0 +1,29 @@
+# 接口契约模板 —— 每个模块一个文件：<module>.yaml
+# 契约是并行的唯一依据。变更须技术负责人批准并升版；并行方须回报版本号，
+# 未回报或版本不一致的产出一律拒收（B3 / 规范 §3.3）。
+
+contract: <module>
+version: v0.1
+status: draft            # draft | frozen | deprecated
+updated: <YYYY-MM-DD>
+owner: <待确认>
+
+options:
+  # 共享选项 / 开关 / 默认值
+  <key>: <value>
+
+error_codes:
+  - code: E2-XXX-001
+    message: <什么情况下返回>
+
+endpoints:
+  - name: <操作名>
+    input:
+      <field>: <type>
+    output:
+      <field>: <type>
+    errors: [E2-XXX-001]
+
+versioning_rule: |
+  变更须升版（v0.1 → v0.2）；所有并行方须回报「我用 vX.Y」；
+  未回报或版本不一致的产出拒收。
