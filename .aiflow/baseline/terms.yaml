@@ -1,0 +1,80 @@
+# 术语表 v0.1 —— 全项目唯一来源，禁止在其他文档重复定义
+#
+# 【格式说明】本文件示例使用 YAML；可替换为任意机器可读格式（TOML / JSON / Markdown 表格）。
+#   只需满足三项要求：① 唯一来源 ② 可版本化 ③ 可脚本校验。格式不同不构成不合规。
+# 【内容说明】以下术语为示例骨架，请按项目实际概念替换。
+# 状态：confirmed（确认）| pending（待定）| deprecated（已废弃，移出检索）
+meta:
+  version: v0.1
+  status: draft            # 预填草稿，本人核实后改 confirmed
+  updated: 2026-11-07
+  owner: <待确认>
+
+terms:
+  capability:
+    zh: 能力
+    en: Capability
+    definition: 框架对外提供的一项可装配功能单元，通过契约声明其依赖与生命周期
+    not_confused_with: [provider, plugin, module]
+    status: confirmed
+    authority: B
+
+  contract:
+    zh: 契约
+    en: Contract
+    definition: 能力的抽象接口定义，只声明行为，不含任何实现细节
+    not_confused_with: [interface_doc]
+    status: confirmed
+    authority: B
+
+  provider:
+    zh: 提供者
+    en: Provider
+    definition: 某能力契约的具体实现，通过 SPI 注册进入注册中心
+    status: confirmed
+    authority: B
+
+  registry:
+    zh: 注册中心
+    en: Registry
+    definition: 收集并提供 Provider 实例的组件，支持命名空间隔离与优先级排序
+    status: confirmed
+    authority: B
+
+  dependency_graph:
+    zh: 能力依赖图
+    en: Capability Dependency Graph
+    definition: 描述能力间依赖关系的有向图，用于拓扑排序与装载顺序推导
+    notes: 装载前必须做环检测，成环即 fail-fast
+    status: confirmed
+    authority: B
+
+  lifecycle:
+    zh: 生命周期
+    en: Lifecycle
+    definition: 能力的阶段集合：init → start → stop → dispose
+    status: confirmed
+    authority: B
+
+  datasource_pool:
+    zh: 数据源连接池
+    en: DataSource Pool
+    definition: 按数据源维度隔离的连接池实例，一数据源一池
+    not_confused_with: [global_pool]
+    status: confirmed
+    authority: B
+
+  capacity_profile:
+    zh: 容量画像
+    en: Capacity Profile
+    definition: 框架对系统并发与访问能力的评估结果输出
+    notes: <待确认：评估维度与产出格式>
+    status: pending
+    authority: C
+
+  # 待补充：项目其他核心概念（如装配、扩展点、命名空间、优先级冲突策略等）
+  _pending_terms:
+    - name: <待确认>
+      zh: <待确认>
+      status: pending
+      authority: C
