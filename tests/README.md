@@ -8,7 +8,7 @@
 python -m unittest discover -s tests -v
 ```
 
-预期：25 条测试全部通过，退出码 0。
+预期：30 条测试全部通过，退出码 0。
 
 ## 覆盖范围
 
@@ -22,6 +22,7 @@ python -m unittest discover -s tests -v
 | dup | 唯一新文件通过 | 复制文件重叠 100% → `D-OVERLAP`；缺 `--new` → `D0` |
 | scan | impact 产出调用方/配置/测试三节；delete 产出静态/动态/配置/文档四节 | — |
 | gate all | 不给 `--new` 时 `dup=SKIP`；给 `--new` 时四门禁串跑 | — |
+| 生成器 | map 检出模块与依赖；pack 产出装配单+载荷；trend 判 R2（退出码 1）与数据不足（退出码 0）；eval 从复盘抽候选 | — |
 
 ## fixture 策略
 

@@ -122,7 +122,7 @@ class TestCliSurface(unittest.TestCase):
     def test_version_flag_reports_runtime(self):
         proc = run_cli(ROOT, "--version")
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        self.assertIn("aipsw tool 1.2.0", proc.stdout)
+        self.assertIn("aipsw tool 1.3.0", proc.stdout)
         self.assertIn("Python", proc.stdout)
 
     def test_help_lists_all_subcommands(self):
@@ -144,7 +144,7 @@ class TestCliSurface(unittest.TestCase):
     def test_version_subcommand(self):
         proc = run_cli(ROOT, "version")
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        self.assertIn("aipsw tool 1.2.0", proc.stdout)
+        self.assertIn("aipsw tool 1.3.0", proc.stdout)
 
 
 class TestInit(unittest.TestCase):
@@ -469,6 +469,86 @@ class TestInitWizard(unittest.TestCase):
             self.assertIn("初始化向导", proc.stdout)
             self.assertTrue((dest / ".aiflow" / "baseline" / "conventions.md").exists())
             self.assertTrue((dest / ".aiflow" / "init-answers.json").exists())
+
+
+
+class TestGenerators(unittest.TestCase):
+    """map / pack / trend / eval 四个 L3 生成器。"""
+
+    def _scaffold(self, td, *init_args):
+        dest = Path(td) / "demo"
+        dest.mkdir()
+        proc = run_cli(ROOT, "init", "--dest", str(dest),
+                       "--templates", str(ROOT / ".aiflow"), "-y", *init_args)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        return dest
+
+    def test_map_detects_modules_and_dependency(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = self._scaffold(td)
+            write(dest / "src" / "alpha" / "a.py", "from beta.b import helper\n\ndef run():\n    return helper()\n")
+            write(dest / "src" / "beta" / "b.py", "def helper():\n    return 1\n")
+            proc = run_cli(dest, "map")
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            out = (dest / ".aiflow" / "baseline" / "现状地图.md").read_text(encoding="utf-8")
+            self.assertIn("alpha", out)
+            self.assertIn("beta", out)
+            self.assertIn("alpha → beta", out)
+
+    def test_pack_writes_assembly_sheet_and_payload(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = self._scaffold(td)
+            proc = run_cli(dest, "pack", "--chg", "CHG-TEST-01", "--module", "order",
+                           "--window", "200000",
+                           "--out", ".aiflow/work/CHG-TEST-01/装配单.md",
+                           "--payload", ".aiflow/work/CHG-TEST-01/payload.md")
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            sheet = (dest / ".aiflow" / "work" / "CHG-TEST-01" / "装配单.md").read_text(encoding="utf-8")
+            self.assertIn("P0 常驻层", sheet)
+            self.assertIn("P1 任务层", sheet)
+            self.assertIn("预算", sheet)
+            self.assertIn("CHG-TEST-01", sheet)
+            self.assertTrue((dest / ".aiflow" / "work" / "CHG-TEST-01" / "payload.md").exists())
+
+    def test_trend_flags_r2_and_returns_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = self._scaffold(td)
+            write(dest / ".aiflow" / "baseline" / "metrics.yaml",
+                  "metrics:\n"
+                  "  C2 事实错误率:\n"
+                  "    target: 0.02\n"
+                  "    direction: lower\n"
+                  "    periods: [0.015, 0.028, 0.031]\n")
+            proc = run_cli(dest, "trend")
+            self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
+            self.assertIn("R2", proc.stdout)
+            self.assertIn("DMAIC", proc.stdout)
+
+    def test_trend_insufficient_data_is_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = self._scaffold(td)
+            write(dest / ".aiflow" / "baseline" / "metrics.yaml",
+                  "metrics:\n"
+                  "  C4 无来源结论:\n"
+                  "    target: 0\n"
+                  "    periods: [1, 2]\n")
+            proc = run_cli(dest, "trend")
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            self.assertIn("数据不足", proc.stdout)
+
+    def test_eval_extracts_candidates_from_retro(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = self._scaffold(td)
+            write(dest / "docs" / "retro.md",
+                  "# 复盘\n\n## 踩过的坑\n\n"
+                  "- 影响面只查静态引用，漏掉反射调用\n"
+                  "- 回滚方案只写在文档里没演练\n\n## 其他\n- 无关内容\n")
+            proc = run_cli(dest, "eval")
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            out = (dest / ".aiflow" / "baseline" / "evals" / "candidates.yaml").read_text(encoding="utf-8")
+            self.assertIn("CAND-01", out)
+            self.assertIn("反射调用", out)
+            self.assertNotIn("无关内容", out)
 
 
 if __name__ == "__main__":

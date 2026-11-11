@@ -30,7 +30,7 @@ import sys
 from datetime import date
 from urllib.parse import unquote
 
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.3.0"
 AIPSW_VERSION = "v1.14"
 
 FENCE = chr(96) * 3
@@ -973,6 +973,661 @@ QUESTION_SHEET = """# 问题清单 · {chg} · {today}
 """
 
 
+# ---------------------------------------------------------------- 生成器
+
+MODULE_CONTAINERS = {
+    "src", "app", "lib", "pkg", "internal", "modules", "module", "source",
+    "backend", "frontend", "server", "client", "core", "service", "services", "cmd",
+}
+
+SYMBOL_RE = {
+    ".py": re.compile(r"^(?:class|def)\s+([A-Za-z_]\w*)"),
+    ".js": re.compile(r"^(?:export\s+)?(?:class|function|const|let|interface|type)\s+([A-Za-z_$][\w$]*)"),
+    ".ts": re.compile(r"^(?:export\s+)?(?:declare\s+)?(?:class|function|const|let|interface|type)\s+([A-Za-z_$][\w$]*)"),
+    ".java": re.compile(r"^\s*(?:public\s+|private\s+|protected\s+)?(?:final\s+|abstract\s+|static\s+)*(?:class|interface|enum|record)\s+([A-Za-z_]\w*)"),
+    ".kt": re.compile(r"^\s*(?:public\s+|private\s+|internal\s+)?(?:data\s+|sealed\s+|abstract\s+)?(?:class|interface|object|fun)\s+([A-Za-z_]\w*)"),
+    ".go": re.compile(r"^(?:type|func)\s+([A-Za-z_]\w*)"),
+    ".cs": re.compile(r"^\s*(?:public\s+|internal\s+|private\s+)?(?:sealed\s+|abstract\s+|static\s+|partial\s+)*(?:class|interface|enum|record|struct)\s+([A-Za-z_]\w*)"),
+    ".rs": re.compile(r"^(?:pub\s+)?(?:struct|enum|trait|fn|type)\s+([A-Za-z_]\w*)"),
+}
+
+IMPORT_RE = {
+    ".py": re.compile(r"^\s*(?:from\s+([\w\.]+)\s+import|import\s+([\w\.]+))"),
+    ".js": re.compile(r"""(?:from\s+['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\))"""),
+    ".ts": re.compile(r"""(?:from\s+['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\))"""),
+    ".java": re.compile(r"^\s*import\s+([\w\.]+)\s*;"),
+    ".kt": re.compile(r"^\s*import\s+([\w\.]+)"),
+    ".go": re.compile(r'^\s*(?:[\w\.]+\s+)?"([^"]+/[^"]+)"'),
+    ".cs": re.compile(r"^\s*using\s+([\w\.]+)\s*;"),
+    ".rs": re.compile(r"^\s*use\s+([\w:]+)"),
+}
+
+ENTRY_NAMES = {"main.py", "main.go", "main.rs", "index.js", "index.ts", "app.js", "app.ts",
+               "manage.py", "__main__.py", "cli.py", "Program.cs", "Main.java"}
+
+
+def _estimate_tokens(text):
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    rest = max(0, len(text) - cjk)
+    return int(cjk * 1.1 + rest / 4.0) + 1
+
+
+def _rel(path, root):
+    try:
+        return os.path.relpath(path, root).replace(os.sep, "/")
+    except ValueError:
+        return path
+
+
+def _module_of(rel):
+    parts = rel.split("/")
+    if len(parts) == 1:
+        return "(根目录)"
+    if parts[0].lower() in MODULE_CONTAINERS and len(parts) > 2:
+        return parts[1]
+    return parts[0]
+
+
+def _resolve_import(imp, modules):
+    for seg in re.split(r"[./\\:]", imp):
+        if seg in modules:
+            return seg
+    return None
+
+
+def cmd_map(args):
+    root = args.root
+    files = list(iter_files(root, CODE_EXT))
+    modules = {}
+    entries = []
+
+    # 第一遍：模块清单 / 符号抽样 / 入口
+    for rel, path in files:
+        mod = _module_of(rel)
+        info = modules.setdefault(mod, {"files": 0, "symbols": [], "lines": 0})
+        info["files"] += 1
+        try:
+            text = read_text(path)
+        except OSError:
+            continue
+        info["lines"] += text.count("\n") + 1
+        if os.path.basename(rel) in ENTRY_NAMES or "if __name__ ==" in text:
+            entries.append(rel)
+        ext = os.path.splitext(rel)[1].lower()
+        sym = SYMBOL_RE.get(ext)
+        if sym:
+            for line in text.splitlines():
+                m = sym.match(line)
+                if m and m.group(1) not in info["symbols"]:
+                    info["symbols"].append(m.group(1))
+                if len(info["symbols"]) >= args.max_symbols:
+                    break
+
+    # 第二遍：依赖（此时模块全集已知）
+    edges = {}
+    for rel, path in files:
+        mod = _module_of(rel)
+        ext = os.path.splitext(rel)[1].lower()
+        imp_re = IMPORT_RE.get(ext)
+        if not imp_re:
+            continue
+        try:
+            text = read_text(path)
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = imp_re.match(line)
+            if not m:
+                continue
+            target = next((g for g in m.groups() if g), None)
+            if not target or target.startswith("."):
+                continue
+            dep = _resolve_import(target, modules)
+            if dep and dep != mod:
+                edges.setdefault(mod, {})
+                edges[mod][dep] = edges[mod].get(dep, 0) + 1
+
+    if not modules:
+        print("没有找到源码文件（支持：" + ", ".join(sorted(CODE_EXT)) + "）")
+        return 0
+
+    top = sorted(modules.items(), key=lambda kv: kv[1]["files"], reverse=True)[: args.max_modules]
+    kept = set(k for k, _ in top)
+
+    lines = []
+    lines.append("# 现状地图 · " + (args.project or os.path.basename(root)) + " · " + date.today().isoformat())
+    lines.append("")
+    lines.append("> 由 `aipsw map` 自动生成（扫描 " + str(len(files)) + " 个源码文件）。")
+    lines.append("> **只盘现状，不补规范**（§3.21 G2）。自动结果只覆盖「结构」，以下三项必须人工补：")
+    lines.append("> ① 每个模块的职责一句话；② 是否越界（允许依赖 vs 实际依赖）；③ 已知技术债。")
+    lines.append("")
+    lines.append("## 1. 模块清单")
+    lines.append("")
+    lines.append("| 模块 | 文件数 | 代码行 | 关键符号（自动抽样） | 职责（**待人工补**） | 对外暴露 |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    for mod, info in top:
+        syms = "、".join(info["symbols"][:6]) or "—"
+        lines.append("| %s | %d | %d | %s | TODO | TODO |" % (mod, info["files"], info["lines"], syms))
+    if len(modules) > len(top):
+        lines.append("")
+        lines.append("> 另有 %d 个模块未列出（--max-modules 可调）：%s" % (
+            len(modules) - len(top), "、".join(sorted(set(modules) - kept))))
+    lines.append("")
+    lines.append("## 2. 实际依赖方向（自动推断，需人工复核）")
+    lines.append("")
+    visible = dict((m, d) for m, d in edges.items() if m in kept and any(x in kept for x in d))
+    if visible:
+        lines.append(FENCE)
+        for mod in sorted(visible):
+            for dep, cnt in sorted(visible[mod].items(), key=lambda kv: -kv[1]):
+                if dep in kept:
+                    lines.append("%s → %s%s" % (mod, dep, "" if cnt == 1 else "  (x%d)" % cnt))
+        lines.append(FENCE)
+        lines.append("")
+        lines.append("> 推断依据是 import / require 的模块名匹配，**可能漏掉反射、SPI、动态加载**。")
+        lines.append("> 请对照 `conventions.md` 第 3 节的「允许依赖」标出越界项。")
+    else:
+        lines.append("（未发现跨模块 import。可能是单模块项目，或依赖靠反射/配置注入——需人工确认。）")
+    lines.append("")
+    lines.append("## 3. 入口与关键路径")
+    lines.append("")
+    if entries:
+        for e in entries[:20]:
+            lines.append("- " + e)
+    else:
+        lines.append("（未识别到入口文件，请人工补：主入口 / 定时任务 / 消息消费者）")
+    lines.append("")
+    lines.append("## 4. 已知技术债")
+    lines.append("")
+    lines.append("| 项 | 影响 | 是否本次范围 |")
+    lines.append("| --- | --- | --- |")
+    lines.append("| TODO：越界调用（见第 2 节） | 可维护性 | 待判 |")
+    lines.append("| TODO：无测试覆盖的模块 | 回归风险 | 待判 |")
+    lines.append("")
+
+    body = "\n".join(lines) + "\n"
+    out = args.out
+    if out is None and os.path.isdir(os.path.join(root, ".aiflow")):
+        out = os.path.join(".aiflow", "baseline", "现状地图.md")
+    if out:
+        path = out if os.path.isabs(out) else os.path.join(root, out)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        print("已生成现状地图: " + path)
+    else:
+        sys.stdout.write(body)
+    print("")
+    print("扫描: %d 个文件｜模块: %d 个｜跨模块依赖: %d 条｜入口: %d 个" % (
+        len(files), len(modules), sum(len(v) for v in edges.values()), len(entries)))
+    print("下一步: 补上「职责」「越界判定」「技术债」三列 —— 自动部分到此为止。")
+    return 0
+
+
+def _parse_md_table(text, must_have_header):
+    """找出表头含关键字的表格，返回 (列名列表, [行单元格列表])。"""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not line.strip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if must_have_header not in cells:
+            continue
+        if i + 1 >= len(lines) or not re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i + 1]):
+            continue
+        rows = []
+        for row in lines[i + 2:]:
+            if not row.strip().startswith("|"):
+                break
+            rows.append([c.strip() for c in row.strip().strip("|").split("|")])
+        return cells, rows
+    return None, []
+
+
+def cmd_pack(args):
+    root = args.root
+    base = os.path.join(root, ".aiflow", "baseline")
+    if not os.path.isdir(base):
+        die("找不到 .aiflow/baseline，先跑 aipsw init")
+
+    window = args.window
+    available = int(window * 0.75)
+    p0_budget = int(available * 0.30)
+    p1_budget = int(available * 0.50)
+
+    keywords = [k.lower() for k in (args.keyword or [])]
+    p0, p1, p2, skipped = [], [], [], []
+
+    def add(bucket, name, path, form):
+        try:
+            content = read_text(path)
+        except OSError:
+            return
+        bucket.append({"name": name, "form": form, "tokens": _estimate_tokens(content),
+                       "content": content, "path": path})
+
+    conv = os.path.join(base, "conventions.md")
+    if os.path.exists(conv):
+        add(p0, "conventions.md", conv, "全文（精简版 ≤ 2KB）")
+    else:
+        skipped.append(("conventions.md", "文件不存在"))
+
+    terms_path = os.path.join(base, "terms.yaml")
+    if os.path.exists(terms_path):
+        text = read_text(terms_path)
+        blocks = text.split("\n  ")[1:]
+        picked = [b for b in blocks if not keywords or any(k in b.lower() for k in keywords)]
+        content = text if not keywords else (text.split("\n  ")[0] + "\n  " + "\n  ".join(picked))
+        form = ("%d 条" % len(picked)) if picked else ("0 条（未命中关键词）" if keywords else "全文")
+        p0.append({"name": "terms.yaml（子集）", "form": form,
+                   "tokens": _estimate_tokens(content), "content": content, "path": terms_path})
+
+    bottom = ("底线 B1–B8：事实有来源 / 单一事实源 / 契约先冻结带版本 / 工具优先于 AI 判 / "
+              "合并前查引用与重复 / 未验证不交付 / 高风险人定稿 / 紧急 24h 补记录")
+    p0.append({"name": "底线 B1–B8", "form": "全文", "tokens": _estimate_tokens(bottom),
+               "content": bottom, "path": "(内置)"})
+
+    cdir = os.path.join(base, "contracts")
+    if os.path.isdir(cdir):
+        wanted = set(args.module or [])
+        for fn in sorted(os.listdir(cdir)):
+            if not fn.endswith((".yaml", ".yml")) or fn.startswith("_"):
+                continue
+            if wanted:
+                data, _e, _d = parse_yaml_file(os.path.join(cdir, fn))
+                if isinstance(data, dict) and str(data.get("contract")) not in wanted:
+                    continue
+            add(p1, "contracts/" + fn, os.path.join(cdir, fn), "全文（本次涉及接口）")
+    else:
+        skipped.append(("contracts/", "目录不存在"))
+
+    fmea = os.path.join(base, "fmea.md")
+    if os.path.exists(fmea):
+        text = read_text(fmea)
+        header, rows = _parse_md_table(text, "RPN")
+        if header and "RPN" in header:
+            idx = header.index("RPN")
+            hot = []
+            for r in rows:
+                if idx < len(r):
+                    raw = r[idx].strip().strip("*").strip()
+                    if raw.isdigit() and int(raw) > 200:
+                        hot.append(r)
+            if hot:
+                content = "| " + " | ".join(header) + " |\n| " + " | ".join(["---"] * len(header)) + " |\n"
+                content += "\n".join("| " + " | ".join(r) + " |" for r in hot)
+                p1.append({"name": "fmea.md（RPN > 200）", "form": "%d 条" % len(hot),
+                           "tokens": _estimate_tokens(content), "content": content, "path": fmea})
+            else:
+                skipped.append(("fmea.md", "没有 RPN > 200 的条目"))
+
+    dec = os.path.join(base, "decisions.md")
+    if os.path.exists(dec):
+        text = read_text(dec)
+        rows = [l for l in text.splitlines() if l.startswith("| ")
+                and not l.startswith("| 日期") and not l.startswith("| ---")]
+        tail = rows[-int(args.decisions):]
+        if tail:
+            content = "\n".join(tail)
+            p1.append({"name": "decisions.md（近 %d 条）" % len(tail), "form": "按主题检索",
+                       "tokens": _estimate_tokens(content), "content": content, "path": dec})
+
+    amap = os.path.join(base, "现状地图.md")
+    if os.path.exists(amap) and args.module:
+        text = read_text(amap)
+        picked = [l for l in text.splitlines() if any(m in l for m in args.module)]
+        if picked:
+            content = "\n".join(picked)
+            p1.append({"name": "现状地图.md（受影响模块）", "form": "%d 行" % len(picked),
+                       "tokens": _estimate_tokens(content), "content": content, "path": amap})
+
+    assets = os.path.join(base, "assets.md")
+    if os.path.exists(assets) and keywords:
+        text = read_text(assets)
+        picked = [l for l in text.splitlines()
+                  if l.startswith("| ") and any(k in l.lower() for k in keywords)]
+        if picked:
+            content = "\n".join(picked[:10])
+            p1.append({"name": "assets.md（关键词命中）", "form": "%d 条" % len(picked[:10]),
+                       "tokens": _estimate_tokens(content), "content": content, "path": assets})
+
+    p2 = [
+        "01-完整版.md（条款，按需切片读）",
+        "02-精简版.md（10 分钟）",
+        "03-演示文档.md（场景例子）",
+        "04-地基模板包.md（模板）",
+        "代码本身：按「变更半径」取，用工具检索，不要整目录塞",
+    ]
+
+    p0_tokens = sum(x["tokens"] for x in p0)
+    p1_tokens = sum(x["tokens"] for x in p1)
+    total = p0_tokens + p1_tokens
+    over = []
+    if p0_tokens > p0_budget:
+        over.append("P0 超预算（%d > %d）" % (p0_tokens, p0_budget))
+    if p1_tokens > p1_budget:
+        over.append("P1 超预算（%d > %d）" % (p1_tokens, p1_budget))
+
+    lines = []
+    lines.append("# 上下文装配单 · " + args.chg + " · " + date.today().isoformat())
+    lines.append("")
+    lines.append("> 由 `aipsw pack` 生成（窗口 %d，可用估 %d）——对应规范附录 J / §3.19.2。" % (window, available))
+    lines.append("> **未注入项也须记录**：「我没给它看 X」和「它没看到 X」是两件事。")
+    lines.append("")
+    lines.append("## 任务信息")
+    lines.append("")
+    lines.append("| 项 | 内容 |")
+    lines.append("| --- | --- |")
+    lines.append("| 变更 ID | " + args.chg + " |")
+    lines.append("| 操作模式 | " + (args.mode or "待填：生成 / 修改 / 查询 / 删除") + " |")
+    lines.append("| 变更级别 | " + (args.level or "待填：L1 / L2 / L3 / L0") + " |")
+    lines.append("| 涉及模块 | " + ("、".join(args.module) if args.module else "待填") + " |")
+    lines.append("| 关键词 | " + ("、".join(args.keyword) if args.keyword else "—") + " |")
+    lines.append("")
+    for title, bucket in (("P0 常驻层（预算 ≤30%）", p0), ("P1 任务层（预算 ≤50%）", p1)):
+        lines.append("### " + title)
+        lines.append("")
+        lines.append("| 资产 | 形态 | 估算 token | 路径 |")
+        lines.append("| --- | --- | --- | --- |")
+        for item in bucket:
+            where = "内置" if item["path"] == "(内置)" else _rel(item["path"], root)
+            lines.append("| %s | %s | %d | %s |" % (item["name"], item["form"], item["tokens"], where))
+        if not bucket:
+            lines.append("| （空） | — | 0 | — |")
+        lines.append("")
+    lines.append("### P2 按需层（工具检索取用，用完即卸）")
+    lines.append("")
+    for item in p2:
+        lines.append("- " + item)
+    lines.append("")
+    lines.append("## 未注入项与理由")
+    lines.append("")
+    lines.append("| 资产 | 未注入原因 | 风险 |")
+    lines.append("| --- | --- | --- |")
+    for name, why in skipped:
+        lines.append("| %s | %s | 待判 |" % (name, why))
+    lines.append("| 全量术语表 | 只给子集 | 可能漏用生僻术语 |")
+    lines.append("| 全量 FMEA | 只给 RPN > 200 | 低 RPN 项可能被忽略 |")
+    lines.append("")
+    lines.append("## 版本核对")
+    lines.append("")
+    lines.append("- [ ] 注入资产版本 = `.aiflow/baseline/` 当前版本（J2）")
+    lines.append("- [ ] 契约版本 = 当前冻结版本（B3）")
+    lines.append("- [ ] 已存快照到 `snapshots/`（J1）")
+    lines.append("")
+    lines.append("## 预算")
+    lines.append("")
+    lines.append("| 层 | 估算 token | 预算 | 占比 |")
+    lines.append("| --- | --- | --- | --- |")
+    lines.append("| P0 | %d | %d | %.0f%% |" % (p0_tokens, p0_budget, p0_tokens * 100.0 / max(1, available)))
+    lines.append("| P1 | %d | %d | %.0f%% |" % (p1_tokens, p1_budget, p1_tokens * 100.0 / max(1, available)))
+    lines.append("| 合计 | %d | — | %.0f%% |" % (total, total * 100.0 / max(1, available)))
+    lines.append("")
+    if over:
+        lines.append("> ⚠️ **超预算**：" + "；".join(over))
+        lines.append("> 按 §3.21 E5：P1 占比 > 60% 必须**拆任务**，不得硬塞长窗口。")
+    else:
+        lines.append("> ✅ 未超预算。若 P1 已超可用 60%，仍须拆任务（E5）。")
+
+    body = "\n".join(lines) + "\n"
+    if args.out:
+        path = args.out if os.path.isabs(args.out) else os.path.join(root, args.out)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        print("已生成装配单: " + path)
+    else:
+        sys.stdout.write(body)
+
+    if args.payload:
+        ppath = args.payload if os.path.isabs(args.payload) else os.path.join(root, args.payload)
+        os.makedirs(os.path.dirname(ppath), exist_ok=True)
+        with open(ppath, "w", encoding="utf-8") as f:
+            f.write("# 注入载荷 · " + args.chg + "\n\n")
+            for item in p0 + p1:
+                f.write("\n\n<!-- ==== " + item["name"] + " ==== -->\n\n")
+                f.write(item["content"])
+                if not item["content"].endswith("\n"):
+                    f.write("\n")
+        print("已生成注入载荷: " + ppath)
+
+    print("P0 %d token / P1 %d token / 可用 %d" % (p0_tokens, p1_tokens, available))
+    if over:
+        print("⚠️ " + "；".join(over))
+    return 0
+
+
+def _to_float(v):
+    if v is None:
+        return None
+    s = str(v).strip().strip("*").strip()
+    try:
+        if s.endswith("%"):
+            return float(s[:-1]) / 100.0
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _load_metrics(path):
+    """支持 YAML（metrics: 名称: target/direction/periods）与 CSV（metric,target,direction,值...）。"""
+    text = read_text(path)
+    metrics = []
+    if path.lower().endswith(".csv"):
+        rows = [r for r in text.splitlines() if r.strip() and not r.strip().startswith("#")]
+        if not rows:
+            return metrics
+        for row in rows[1:]:
+            cells = [c.strip() for c in row.split(",")]
+            if len(cells) < 3:
+                continue
+            metrics.append({
+                "name": cells[0],
+                "target": _to_float(cells[1]),
+                "direction": (cells[2] or "lower").strip().lower(),
+                "values": [_to_float(c) for c in cells[3:] if c.strip()],
+            })
+        return metrics
+
+    data, _errs, _dups = parse_yaml_file(path)
+    blk = (data or {}).get("metrics") if isinstance(data, dict) else None
+    if not isinstance(blk, dict):
+        return metrics
+    for name, spec in blk.items():
+        if not isinstance(spec, dict):
+            continue
+        raw = spec.get("periods") or []
+        if not isinstance(raw, list):
+            raw = [raw]
+        metrics.append({
+            "name": str(name),
+            "target": _to_float(spec.get("target")),
+            "direction": str(spec.get("direction") or "lower").strip().lower(),
+            "values": [_to_float(v) for v in raw],
+        })
+    return metrics
+
+
+def _judge(values, target, direction):
+    """返回 (规则, 说明, 建议动作)。规则 ∈ 数据不足/R3/R2/R1/稳定/达标。"""
+    vals = [v for v in values if v is not None]
+    n = len(vals)
+    lower_better = direction != "higher"
+
+    def worse(a, b):
+        return b > a if lower_better else b < a
+
+    if n < 3:
+        return "数据不足", "%d 期数据，不足 3 期不判趋势" % n, "继续记录，不下结论"
+
+    if target is not None:
+        for v in vals:
+            if lower_better and v >= target * 2:
+                return "R3 越界", "单期 %.4g 已达目标 %.4g 的 2 倍" % (v, target), "立即 MSA（校准判定标准）+ 启动 DMAIC"
+            if (not lower_better) and v <= target / 2.0:
+                return "R3 越界", "单期 %.4g 已跌破目标 %.4g 的一半" % (v, target), "立即 MSA + 启动 DMAIC"
+
+    last3 = vals[-3:]
+    non_improve = True
+    for i in range(2):
+        if worse(last3[i + 1], last3[i]):
+            non_improve = False
+            break
+    above = target is not None and (last3[-1] > target if lower_better else last3[-1] < target)
+    if non_improve and above:
+        return "R2 连续不降", "连续 3 期未改善且仍高于目标", "触发 DMAIC（§3.12）"
+
+    if worse(vals[-2], vals[-1]) and worse(vals[-3], vals[-2]):
+        return "R1 连续上升", "连续 2 期恶化", "标记关注，归因到具体缺陷条目"
+
+    if above:
+        return "稳定", "趋势平稳但仍未达标", "记录；连续两期不达标触发 DMAIC"
+    return "达标", "趋势平稳且达标", "保持监控"
+
+
+def cmd_trend(args):
+    root = args.root
+    path = args.file
+    if not path:
+        default = os.path.join(root, ".aiflow", "baseline", "metrics.yaml")
+        if not os.path.exists(default):
+            die("没有指标文件。用 --file 指定，或按下面格式建 .aiflow/baseline/metrics.yaml：\n"
+                "metrics:\n  C2 事实错误率:\n    target: 0.02\n    direction: lower\n    periods: [0.015, 0.028, 0.031]")
+        path = default
+    path = path if os.path.isabs(path) else os.path.join(root, path)
+    if not os.path.exists(path):
+        die("指标文件不存在: " + path)
+
+    metrics = _load_metrics(path)
+    if not metrics:
+        die("指标文件里没有解析到任何指标（检查 metrics: 结构或 CSV 表头）")
+
+    rows = []
+    for m in metrics:
+        rule, why, action = _judge(m["values"], m["target"], m["direction"])
+        rows.append((m, rule, why, action))
+
+    lines = []
+    lines.append("# 趋势判定 · " + date.today().isoformat())
+    lines.append("")
+    lines.append("> 依据规范 §3.13：R1 连续 2 期上升=关注；R2 连续 3 期未降且高于目标=触发 DMAIC；R3 单期超目标 2 倍=立即 MSA+DMAIC。")
+    lines.append("> 不足 3 期数据只记录、不判定趋势。")
+    lines.append("")
+    lines.append("| 指标 | 目标 | 方向 | 期次数据 | 规则 | 说明 | 建议动作 |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for m, rule, why, action in rows:
+        vals = " → ".join("%.4g" % v for v in m["values"] if v is not None) or "—"
+        target = "%.4g" % m["target"] if m["target"] is not None else "—"
+        lines.append("| %s | %s | %s | %s | **%s** | %s | %s |" % (
+            m["name"], target, "越低越好" if m["direction"] != "higher" else "越高越好",
+            vals, rule, why, action))
+    lines.append("")
+    urgent = [r for r in rows if r[1].startswith(("R2", "R3"))]
+    lines.append("## 结论")
+    lines.append("")
+    if urgent:
+        for m, rule, _w, action in urgent:
+            lines.append("- **%s** → %s：%s" % (m["name"], rule, action))
+    else:
+        lines.append("- 无需立即启动 DMAIC；继续按周期采集。")
+    lines.append("")
+    body = "\n".join(lines) + "\n"
+
+    out = args.out
+    if out:
+        op = out if os.path.isabs(out) else os.path.join(root, out)
+        os.makedirs(os.path.dirname(op), exist_ok=True)
+        with open(op, "w", encoding="utf-8") as f:
+            f.write(body)
+        print("已生成趋势报告: " + op)
+    else:
+        sys.stdout.write(body)
+    print("指标: %d 个｜触发改进: %d 个｜数据不足: %d 个" % (
+        len(rows), len(urgent), sum(1 for r in rows if r[1] == "数据不足")))
+    return 1 if urgent else 0
+
+
+BAD_CASE_KEYWORDS = ("坑", "教训", "bad case", "badcase", "复盘", "失效", "事故", "踩雷", "翻车")
+
+
+def cmd_eval(args):
+    root = args.root
+    sources = []
+    if args.from_:
+        for f in args.from_:
+            fp = f if os.path.isabs(f) else os.path.join(root, f)
+            if os.path.isdir(fp):
+                for rel, path in iter_files(fp, DOC_EXT):
+                    sources.append((os.path.relpath(path, root).replace(os.sep, "/"), path))
+            elif os.path.exists(fp):
+                sources.append((os.path.relpath(fp, root).replace(os.sep, "/"), fp))
+    else:
+        for rel, path in iter_files(root, DOC_EXT):
+            if rel.startswith("skill/") or rel.startswith(".aiflow/archive/") or rel.startswith(".aiflow/baseline/"):
+                continue
+            if rel.startswith(".aiflow/work/") or rel.startswith("docs/"):
+                sources.append((rel, path))
+
+    found = []
+    seen = set()
+    strip_re = re.compile("[" + chr(96) + "*_]")
+    for rel, path in sources:
+        try:
+            text = read_text(path)
+        except OSError:
+            continue
+        grab = False
+        for ln, line in enumerate(text.splitlines(), 1):
+            if line.startswith("#"):
+                grab = any(k in line.lower() for k in BAD_CASE_KEYWORDS)
+                continue
+            if not grab:
+                continue
+            m = re.match(r"^\s*[-*]\s+(.+)", line)
+            if not m:
+                continue
+            task = strip_re.sub("", m.group(1)).strip()
+            if len(task) < 6 or task in seen:
+                continue
+            seen.add(task)
+            found.append({"source": "%s:%d" % (rel, ln), "task": task})
+
+    if not found:
+        print("没有找到疑似 bad case 的条目。")
+        print("提示：在复盘文档里用「## 踩过的坑」「## 教训」「## bad case」这类标题，条目用 - 开头。")
+        return 0
+
+    lines = []
+    lines.append("# 评测集候选（从历史 bad case 抽取）· " + date.today().isoformat())
+    lines.append("#")
+    lines.append("# 由 aipsw eval 生成。**复核后再并入 evals/cases.yaml**：")
+    lines.append("#   task 要能一句话复现问法；must_not 写「做错长什么样」；expected 可按需改。")
+    lines.append("cases:")
+    for i, item in enumerate(found[: args.limit], 1):
+        lines.append("  - id: CAND-%02d" % i)
+        lines.append("    type: negative")
+        lines.append("    source: %s" % item["source"])
+        lines.append("    task: %s" % item["task"].replace(":", "："))
+        lines.append("    must_not: [<错误做法，人工补>]")
+        lines.append("    expected: fail_on_purpose")
+    body = "\n".join(lines) + "\n"
+
+    out = args.out or (os.path.join(".aiflow", "baseline", "evals", "candidates.yaml")
+                       if os.path.isdir(os.path.join(root, ".aiflow")) else None)
+    if out:
+        op = out if os.path.isabs(out) else os.path.join(root, out)
+        os.makedirs(os.path.dirname(op), exist_ok=True)
+        with open(op, "w", encoding="utf-8") as f:
+            f.write(body)
+        print("已生成候选: " + op)
+    else:
+        sys.stdout.write(body)
+    print("候选 %d 条（来自 %d 个文档）｜复核后并入 evals/cases.yaml" % (min(len(found), args.limit), len(sources)))
+    return 0
+
+
 # ---------------------------------------------------------------- init 向导
 
 KIND_CHOICES = [
@@ -1516,9 +2171,12 @@ def build_parser():
     ap.add_argument("--root", default=".", help="项目根目录，默认当前目录")
     ap.add_argument("--version", action="version",
                     version=version_text())
+    COMMON = argparse.ArgumentParser(add_help=False)
+    COMMON.add_argument("--root", default=argparse.SUPPRESS, help="项目根目录（也可写在子命令后面）")
+
     sub = ap.add_subparsers(dest="cmd")
 
-    p_init = sub.add_parser("init", help="初始化项目地基（交互向导 + 自动填模板）")
+    p_init = sub.add_parser("init", parents=[COMMON], help="初始化项目地基（交互向导 + 自动填模板）")
     p_init.add_argument("--dest", help="目标项目根目录，默认当前目录")
     p_init.add_argument("--templates", help="模板目录（默认自动查找）")
     p_init.add_argument("--project", help="项目名")
@@ -1533,41 +2191,67 @@ def build_parser():
     p_init.add_argument("--answers", help="从 JSON 文件读取答案（跳过向导）")
     p_init.add_argument("--force", action="store_true", help="覆盖已存在的 .aiflow")
 
-    p_gate = sub.add_parser("gate", help="跑门禁检查")
+    p_gate = sub.add_parser("gate", parents=[COMMON], help="跑门禁检查")
     gsub = p_gate.add_subparsers(dest="gate")
 
-    g_terms = gsub.add_parser("terms", help="术语单一事实源检查")
+    g_terms = gsub.add_parser("terms", parents=[COMMON], help="术语单一事实源检查")
     g_terms.add_argument("--file", help="terms 文件路径")
 
-    gsub.add_parser("toc", help="目录 <-> 章节覆盖率检查")
+    gsub.add_parser("toc", parents=[COMMON], help="目录 <-> 章节覆盖率检查")
 
-    g_sig = gsub.add_parser("sig", help="契约 <-> 代码签名检查")
+    g_sig = gsub.add_parser("sig", parents=[COMMON], help="契约 <-> 代码签名检查")
     g_sig.add_argument("--contracts", help="契约目录")
 
-    g_dup = gsub.add_parser("dup", help="重复度检查")
+    g_dup = gsub.add_parser("dup", parents=[COMMON], help="重复度检查")
     g_dup.add_argument("--new", action="append", help="新文件（可重复）")
     g_dup.add_argument("--threshold", type=float, default=0.10, help="重叠阈值，默认 0.10（规范目标 <= 10%%）")
     g_dup.add_argument("--min-lines", type=int, default=30, help="小于该行数不比对，默认 30")
 
-    g_all = gsub.add_parser("all", help="依次跑 terms / toc / sig（给 --new 时加跑 dup）")
+    g_all = gsub.add_parser("all", parents=[COMMON], help="依次跑 terms / toc / sig（给 --new 时加跑 dup）")
     g_all.add_argument("--new", action="append", help="新增文件（给 dup 用；可重复）")
     g_all.add_argument("--threshold", type=float, default=0.10, help="dup 阈值，默认 0.10")
     g_all.add_argument("--min-lines", type=int, default=30, help="dup 小于该行数不比对，默认 30")
 
-    p_scan = sub.add_parser("scan", help="扫描并产出清单骨架")
+    p_scan = sub.add_parser("scan", parents=[COMMON], help="扫描并产出清单骨架")
     ssub = p_scan.add_subparsers(dest="scan")
-    s_imp = ssub.add_parser("impact", help="影响面扫描（修改类 M1）")
+    s_imp = ssub.add_parser("impact", parents=[COMMON], help="影响面扫描（修改类 M1）")
     s_imp.add_argument("--symbol", action="append", help="要改的符号（可重复）")
     s_imp.add_argument("--key", action="append", help="配置项名（可重复）")
     s_imp.add_argument("--out", help="输出文件（相对 root），不给则打印到标准输出")
     s_imp.add_argument("--max-rows", type=int, default=200, help="每类最多输出行数")
 
-    s_del = ssub.add_parser("delete", help="删除引用扫描（删除专项 D2）")
+    s_del = ssub.add_parser("delete", parents=[COMMON], help="删除引用扫描（删除专项 D2）")
     s_del.add_argument("--symbol", required=True, help="要删除的符号 / 接口名")
     s_del.add_argument("--out", help="输出文件（相对 root）")
     s_del.add_argument("--max-rows", type=int, default=200, help="每类最多输出行数")
 
-    sub.add_parser("version", help="打印版本")
+    p_map = sub.add_parser("map", parents=[COMMON], help="生成 / 更新现状地图（扫结构+依赖）")
+    p_map.add_argument("--out", help="输出文件（默认写 .aiflow/baseline/现状地图.md）")
+    p_map.add_argument("--project", help="项目名，只影响标题")
+    p_map.add_argument("--max-modules", type=int, default=30, help="最多列几个模块，默认 30")
+    p_map.add_argument("--max-symbols", type=int, default=8, help="每模块抽几个关键符号，默认 8")
+
+    p_pack = sub.add_parser("pack", parents=[COMMON], help="生成上下文装配单（P0/P1/P2 + 预算）")
+    p_pack.add_argument("--chg", required=True, help="变更 ID，如 CHG-20261111-01")
+    p_pack.add_argument("--module", action="append", help="涉及模块（可重复）")
+    p_pack.add_argument("--keyword", action="append", help="关键词，用于过滤术语/资产（可重复）")
+    p_pack.add_argument("--window", type=int, default=200000, help="模型窗口 token，默认 200000")
+    p_pack.add_argument("--mode", help="操作模式：生成/修改/查询/删除")
+    p_pack.add_argument("--level", help="变更级别：L0-L3")
+    p_pack.add_argument("--decisions", type=int, default=5, help="带最近几条决策，默认 5")
+    p_pack.add_argument("--out", help="装配单输出路径")
+    p_pack.add_argument("--payload", help="额外输出拼接好的注入载荷文件")
+
+    p_trend = sub.add_parser("trend", parents=[COMMON], help="趋势判定（R1/R2/R3）")
+    p_trend.add_argument("--file", help="指标文件（默认 .aiflow/baseline/metrics.yaml，也支持 .csv）")
+    p_trend.add_argument("--out", help="报告输出路径（默认打印）")
+
+    p_eval = sub.add_parser("eval", parents=[COMMON], help="从历史 bad case 抽取评测集候选")
+    p_eval.add_argument("--from", dest="from_", action="append", help="扫描的文件或目录（可重复）")
+    p_eval.add_argument("--out", help="输出路径（默认 .aiflow/baseline/evals/candidates.yaml）")
+    p_eval.add_argument("--limit", type=int, default=20, help="最多抽几条，默认 20")
+
+    sub.add_parser("version", parents=[COMMON], help="打印版本")
     return ap
 
 
@@ -1624,6 +2308,14 @@ def main(argv=None):
         if args.scan == "delete":
             return cmd_scan_delete(args)
         ap.parse_args(["scan", "-h"])
+    if args.cmd == "map":
+        return cmd_map(args)
+    if args.cmd == "pack":
+        return cmd_pack(args)
+    if args.cmd == "trend":
+        return cmd_trend(args)
+    if args.cmd == "eval":
+        return cmd_eval(args)
     ap.print_help()
     return 2
 

@@ -62,6 +62,18 @@ def sha256(path):
     return h.hexdigest()
 
 
+def _powershell_can_spawn():
+    """当前 PowerShell 能否启动外部进程。受限沙箱里会返回 False。"""
+    try:
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command",
+             "$c = Get-Command cmd -ErrorAction SilentlyContinue; if ($c) { 'OK' } else { 'NO' }"],
+            stderr=subprocess.DEVNULL, timeout=30)
+        return b"OK" in out
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def check():
     """解压到 dist/.check，模拟别人装好后的第一次运行（不走管道，避开沙箱限制）。"""
     tmp = os.path.join(DIST_DIR, ".check")
@@ -86,8 +98,11 @@ def check():
         ]
         if sys.platform == "win32":
             steps.append(("aipsw.cmd", ["cmd", "/c", os.path.join(root, "scripts", "aipsw.cmd"), "version"], tmp))
-            steps.append(("aipsw.ps1", ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                                        "-File", os.path.join(root, "scripts", "aipsw.ps1"), "version"], tmp))
+            if _powershell_can_spawn():
+                steps.append(("aipsw.ps1", ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                                            "-File", os.path.join(root, "scripts", "aipsw.ps1"), "version"], tmp))
+            else:
+                print("  [SKIP] aipsw.ps1（当前 PowerShell 无法启动外部进程，受限环境）")
         for label, cmd, cwd in steps:
             try:
                 code = subprocess.call(cmd, cwd=cwd)

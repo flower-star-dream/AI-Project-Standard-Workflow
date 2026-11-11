@@ -74,7 +74,7 @@ Copy-Item -Recurse -Force ".\skill\aipsw" "$env:USERPROFILE\.dsh\skills\aipsw"
 
 Linux / macOS 用 `unzip dist/aipsw.skill -d ~/.dsh/skills`（zip 里已写 0755，解压后 `scripts/aipsw.py` 可直接执行）。
 
-装完先自检入口脚本（应打印 `aipsw tool 1.2.0 (AIPSW v1.14; Python 3.x)`）：
+装完先自检入口脚本（应打印 `aipsw tool 1.3.0 (AIPSW v1.14; Python 3.x)`）：
 
 ```powershell
 python "$env:USERPROFILE\.dsh\skills\aipsw\scripts\aipsw.py" version
@@ -170,6 +170,10 @@ python scripts/aipsw.py gate dup --new src/main/java/order/OrderExportService.ja
 | `gate all --new` | terms / toc / sig 串跑，并加跑 dup | 合并前一次性门禁 |
 | `scan impact` | 产出《影响面清单》骨架（调用方/配置/测试） | §3.14.2 M1 |
 | `scan delete` | 产出《删除专项检查单》骨架（含动态引用候选） | §3.16 D2 |
+| `map` | 扫结构+依赖，生成《现状地图》骨架 | §3.21 G2 |
+| `pack` | 按 P0/P1/P2 生成装配单 + 预算核算 | §3.19 / 附录 J |
+| `trend` | 指标趋势判定 R1/R2/R3 | §3.13 |
+| `eval` | 从复盘文档抽 bad case → 评测集候选 | 阶段 7 |
 
 门禁结果写到 `reports/*.json`；**退出码 0 = 通过，1 = 有 error**，可直接接 CI：
 
@@ -228,6 +232,54 @@ python scripts/aipsw.py init --profile strict        # 直接选严格档
 `@
 
 > 答案存在 `.aiflow/init-answers.json`，想改重新跑 `init --force`。
+
+
+### 四个生成器（L3）
+
+**`map` —— 接手陌生仓库的第一步**
+
+`@bash
+python scripts/aipsw.py map --root .      # 写 .aiflow/baseline/现状地图.md
+`@
+
+扫源码 → 模块清单（文件数 / 行数 / 关键符号）+ 跨模块依赖（import 推断）+ 入口文件。
+**只盘结构**：职责、越界判定、技术债三列仍要人工补——它不会替你做判断。
+
+**`pack` —— 上下文到底给多少**
+
+`@bash
+python scripts/aipsw.py pack --chg CHG-20261111-01 ^
+    --module order --keyword 订单 --window 200000 ^
+    --out .aiflow/work/CHG-20261111-01/装配单.md ^
+    --payload .aiflow/work/CHG-20261111-01/payload.md
+`@
+
+按 P0/P1/P2 规则挑资产、按 §3.19.2 估算 token、超预算直接告诉你「该拆任务」。
+`--payload` 额外产出一份拼好的注入载荷，可直接喂给模型。
+
+**`trend` —— 6σ 的自动判定**
+
+`@bash
+python scripts/aipsw.py trend --file .aiflow/baseline/metrics.yaml
+`@
+
+`@yaml
+metrics:
+  C2 事实错误率:
+    target: 0.02
+    direction: lower
+    periods: [0.015, 0.028, 0.031]
+`@
+
+R1/R2/R3 自动判，**触发改进时退出码 1**（可接 CI）。也支持 CSV。
+
+**`eval` —— 评测集冷启动**
+
+`@bash
+python scripts/aipsw.py eval --from docs/retro.md
+`@
+
+从「踩过的坑 / 教训 / bad case」小节抽条目 → `.aiflow/baseline/evals/candidates.yaml`，复核后并入 `cases.yaml`。
 
 ---
 
@@ -299,7 +351,8 @@ python scripts/aipsw.py init --profile strict        # 直接选严格档
 
 ## 版本
 
-- **AIPSW 资料包 v1.14**：完整版 v1.14 ｜ 精简版 v1.4 ｜ 演示 v1.3 ｜ 模板包 v1.4 ｜ CLI 1.2.0
+- **AIPSW 资料包 v1.14**：完整版 v1.14 ｜ 精简版 v1.4 ｜ 演示 v1.3 ｜ 模板包 v1.4 ｜ CLI 1.3.0
 - 逐版变更见完整版[附录 F（版本简史）](01-完整版-v1.14.md#附录-f版本简史)
 - v1.13：配套 CLI（init / 4 门禁 / 2 扫描）、问题清单与功能级删除清单模板、20 条正反例测试；README 重写
-- v1.14：**init 交互向导 + 模板自动填充**（6 个问题、档位推导、默认方案）；规范补 §3.22 需求变更、附录 C.3 FMEA 打分锚点、§3.19.2 预算分母；CLI 1.2.0
+- v1.14：**init 交互向导 + 模板自动填充**（6 个问题、档位推导、默认方案）；规范补 §3.22 需求变更、附录 C.3 FMEA 打分锚点、§3.19.2 预算分母
+- CLI 1.3.0：新增 `map` / `pack` / `trend` / `eval` 四个生成器

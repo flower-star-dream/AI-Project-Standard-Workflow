@@ -3,7 +3,7 @@
 零第三方依赖，只需要 Python 3.8+（Windows 用 `aipsw.cmd` 或 `aipsw.ps1` 包装）。
 
 ```bash
-python scripts/aipsw.py --version   # aipsw tool 1.2.0 (AIPSW v1.14; Python 3.x.y)
+python scripts/aipsw.py --version   # aipsw tool 1.3.0 (AIPSW v1.14; Python 3.x.y)
 ```
 
 ## 安装到你的项目
@@ -28,6 +28,10 @@ python D:\AI-Project-Standard-Workflow\scripts\aipsw.py init --dest D:\my-projec
 | `aipsw gate all` | 依次跑 terms / toc / sig；给 `--new` 时加跑 dup | 合并前门禁 |
 | `aipsw scan impact` | 影响面扫描，产出《影响面清单》骨架 | §3.14.2 M1 |
 | `aipsw scan delete` | 引用穷尽扫描，产出《删除专项检查单》骨架 | §3.16 D2 |
+| `aipsw map` | 扫结构+依赖，生成《现状地图》骨架（模块/依赖/入口） | §3.21 G2 |
+| `aipsw pack` | 按 P0/P1/P2 生成装配单，核算 token 预算 | §3.19 / 附录 J |
+| `aipsw trend` | 指标趋势判定 R1/R2/R3（支持 YAML / CSV） | §3.13 |
+| `aipsw eval` | 从复盘文档抽 bad case → 评测集候选 | 阶段 7 |
 
 ## 初始化向导（`aipsw init`）
 
@@ -95,6 +99,19 @@ python scripts/aipsw.py scan impact --symbol OrderService --key "order.page.size
 # 删一个接口：先扫引用
 python scripts/aipsw.py scan delete --symbol legacyGetConnection ^
     --out .aiflow/work/CHG-20261109-01/删除专项检查单.md
+
+# 接手陌生仓库：先出现状地图
+python scripts/aipsw.py map --root .
+
+# 开工前：生成上下文装配单（含预算核算）
+python scripts/aipsw.py pack --chg CHG-20261111-01 --module order ^
+    --window 200000 --out .aiflow/work/CHG-20261111-01/装配单.md
+
+# 每期复盘：判趋势（R1/R2/R3），触发改进时退出码 1
+python scripts/aipsw.py trend --file .aiflow/baseline/metrics.yaml
+
+# 把「踩过的坑」变成评测集候选
+python scripts/aipsw.py eval --from docs/retro.md
 
 # 合并前跑门禁
 python scripts/aipsw.py gate all

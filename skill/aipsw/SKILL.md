@@ -169,6 +169,10 @@ D1 必要性（能否改为废弃）→ D2 使用方**穷尽**（静态 / **动�
 | `python scripts/aipsw.py gate all --new <文件>` | 合并前一次性门禁 | 四门禁全过 |
 | `python scripts/aipsw.py scan impact --symbol X --key K` | 修改类开工（M1） | 产出《影响面清单》骨架 |
 | `python scripts/aipsw.py scan delete --symbol X` | 删除前（D2） | 产出《删除专项检查单》骨架 |
+| `python scripts/aipsw.py map --root .` | 接手陌生仓库 | 产出《现状地图》：模块 / 依赖 / 入口（职责与越界仍需人工补） |
+| `python scripts/aipsw.py pack --chg <ID> --module M` | 开工前装配上下文 | 产出装配单 + 预算核算；超预算提示拆任务 |
+| `python scripts/aipsw.py trend --file metrics.yaml` | 每期复盘 | R1/R2/R3 判定；触发改进时退出码 1 |
+| `python scripts/aipsw.py eval --from docs/retro.md` | 复盘后 | 抽出评测集候选（复核后并入 cases.yaml） |
 
 > **装好先自检**：在 skill 根目录跑 `python scripts/aipsw.py version`，应打印 `aipsw tool 1.1.0`。脚本零依赖（Python 3.8+），所有路径按 `__file__` 相对解析，整个 `aipsw/` 目录搬到哪个宿主的 skills 目录都能直接跑；Windows 用 `scripts/aipsw.cmd`（跑 .ps1 遇执行策略拦截时，改用 .cmd 或加 `-ExecutionPolicy Bypass`）。
 
@@ -239,5 +243,5 @@ D1 必要性（能否改为废弃）→ D2 使用方**穷尽**（静态 / **动�
 
 ---
 
-> **版本**：AIPSW v1.14｜完整版 v1.14 ｜ 精简版 v1.4 ｜ 演示 v1.3 ｜ 模板包 v1.4 ｜ 工具 1.2.0
+> **版本**：AIPSW v1.14｜完整版 v1.14 ｜ 精简版 v1.4 ｜ 演示 v1.3 ｜ 模板包 v1.4 ｜ 工具 1.3.0
 > **权威来源**：项目仓库根目录的四份文档与 `scripts/aipsw.py`；`references/` 下为快照副本，若与仓库不一致以仓库为准。
