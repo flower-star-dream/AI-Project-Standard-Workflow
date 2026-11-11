@@ -17,6 +17,8 @@ skill/aipsw/
     └── templates/aiflow/  项目地基骨架
 ```
 
+- 打包分发：`python scripts/build_skill.py --check` 生成 `dist/aipsw.skill`（含 `scripts/` + `references/`，入口脚本写 0755，并解压到临时目录跑一遍 version/init/gate 自检）。
+
 ## 维护约定
 
 - 四份文档升版后：重新拷贝到 `references/`（文件名保持不带版本号），并更新 `SKILL.md` 末尾版本行；

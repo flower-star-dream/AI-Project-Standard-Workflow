@@ -7,10 +7,10 @@ AIPSW = AI Project Standard Workflow（AI 项目开发标准规范工作流程�
 子命令:
   init            把 .aiflow 骨架装进目标项目，并填掉占位符
   gate terms      术语单一事实源检查（T1-T4）
-  gate toc        目录 <-> 章节覆盖率检查
+  gate toc        目录/跨文件链接 <-> 章节覆盖率检查
   gate sig        接口契约 <-> 代码签名检查
   gate dup        新代码与既有资产的重复度检查
-  gate all        依次执行 terms / toc / sig
+  gate all        依次执行 terms / toc / sig（--new 时加跑 dup）
   scan impact     修改类 M1：影响面扫描，产出《影响面清单》骨架
   scan delete     删除专项 D2：引用穷尽扫描，产出《删除专项检查单》骨架
   version
@@ -28,16 +28,17 @@ import re
 import shutil
 import sys
 from datetime import date
+from urllib.parse import unquote
 
-TOOL_VERSION = "1.0.0"
-AIPSW_VERSION = "v1.13"
+TOOL_VERSION = "1.2.0"
+AIPSW_VERSION = "v1.14"
 
 FENCE = chr(96) * 3
 
 SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
     "dist", "build", "target", "out", ".idea", ".vscode", ".mypy_cache",
-    ".pytest_cache", "reports", ".aiflow/archive",
+    ".pytest_cache", "reports", ".aiflow/archive", ".aiflow/work",
 }
 CODE_EXT = {
     ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".java", ".kt", ".kts",
@@ -70,7 +71,8 @@ def iter_files(root, exts=None, skip_archive=True):
         keep = []
         for d in dirnames:
             joined = (rel_dir + "/" + d) if rel_dir else d
-            if d in SKIP_DIRS or joined in SKIP_DIRS:
+            if (d in SKIP_DIRS or joined in SKIP_DIRS
+                    or d.startswith(".tmp-") or d.startswith(".pkg-")):
                 continue
             if skip_archive and d == "archive" and ".aiflow" in joined:
                 continue
@@ -198,6 +200,31 @@ def parse_md_toc(text):
         for m in re.finditer(r"\]\(#([^)]+)\)", line):
             items.append((ln, m.group(1)))
     return items
+
+
+def parse_md_links(text):
+    """解析 Markdown 链接/图片目标（跳过围栏代码块）。"""
+    items = []
+    for ln, line in md_lines_outside_fence(text):
+        for m in re.finditer(r"!?\[[^\]]*\]\(([^)]+)\)", line):
+            items.append((ln, m.group(1)))
+    return items
+
+
+def _link_target(raw):
+    """返回 (相对路径, 锚点) 或 None（外链 / 纯锚点）。"""
+    raw = raw.strip()
+    if raw.startswith("<") and raw.endswith(">"):
+        raw = raw[1:-1].strip()
+    if raw.lower().startswith(("http://", "https://", "mailto:", "tel:", "#", "//")):
+        return None
+    raw = re.sub(r'\s+"[^"]*"$', "", raw)
+    raw = re.sub(r"\s+'[^']*'$", "", raw)
+    path, _, anchor = raw.partition("#")
+    path = unquote(path.strip())
+    if not path:
+        return None
+    return path, anchor
 
 
 # ---------------------------------------------------------------- 极简 YAML
@@ -450,15 +477,37 @@ def cmd_gate_toc(args):
     rep = Report("toc")
     total_docs = 0
     total_links = 0
+    total_cross = 0
     for rel, path in iter_files(root, DOC_EXT):
-        if rel.startswith("skill/"):
-            continue
         text = read_text(path)
         anchors, titles = build_anchor_map(text)
+        total_docs += 1
+
+        # 跨文件链接 / 跨文件锚点：文件不存在或锚点失效都算断链
+        for ln, raw in parse_md_links(text):
+            parsed = _link_target(raw)
+            if not parsed:
+                continue
+            target_rel, target_anchor = parsed
+            if target_rel.startswith("/"):
+                target_rel = target_rel.lstrip("/")
+            resolved = os.path.normpath(os.path.join(os.path.dirname(rel), target_rel)).replace(os.sep, "/")
+            full = os.path.join(root, resolved)
+            total_cross += 1
+            if not os.path.exists(full):
+                rep.err("TOC-3", "链接指向的文件不存在：" + raw, "%s:%d" % (rel, ln))
+                continue
+            if target_anchor and resolved.lower().endswith((".md", ".markdown")):
+                target_anchors, _ = build_anchor_map(read_text(full))
+                if target_anchor not in target_anchors:
+                    rep.err("TOC-3", "跨文件锚点不存在：" + raw,
+                            "%s:%d" % (rel, ln))
+
+        if rel.startswith("skill/"):
+            continue
         links = parse_md_toc(text)
         if not links:
             continue
-        total_docs += 1
         total_links += len(links)
         for ln, target in links:
             if target not in anchors:
@@ -480,7 +529,7 @@ def cmd_gate_toc(args):
                 rep.warn("TOC-2", "二级标题覆盖率 %.0f%%（< 90%%）：%d/%d 个二级标题未进目录" % (
                     rate * 100, len(h2) - covered, len(h2)), rel)
 
-    rep.note("检查文档：%d 个｜内部链接：%d 条" % (total_docs, total_links))
+    rep.note("检查文档：%d 个｜内部链接：%d 条｜跨文件链接：%d 条" % (total_docs, total_links, total_cross))
     return finish(rep, root, "toc_check.json", args)
 
 
@@ -852,8 +901,11 @@ def _emit(body, args, root):
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(body)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+        except OSError as e:
+            die("无法写入 %s: %s" % (path, e))
         print("已写入: " + path)
         return 0
     sys.stdout.write(body)
@@ -921,6 +973,456 @@ QUESTION_SHEET = """# 问题清单 · {chg} · {today}
 """
 
 
+# ---------------------------------------------------------------- init 向导
+
+KIND_CHOICES = [
+    ("1", "web", "网站 / 后端服务"),
+    ("2", "mobile", "手机 App"),
+    ("3", "cli", "桌面 / 命令行工具"),
+    ("4", "data", "数据分析 / 脚本"),
+    ("5", "unknown", "不确定（先按通用方案）"),
+]
+LANG_CHOICES = [
+    ("1", "python", "Python"),
+    ("2", "js", "JavaScript / TypeScript"),
+    ("3", "java", "Java"),
+    ("4", "go", "Go"),
+    ("5", "cs", "C#"),
+    ("6", "unknown", "不确定（先按通用方案）"),
+]
+TEAM_CHOICES = [
+    ("1", "solo", "就我一个"),
+    ("2", "small", "小团队（2~5 人）"),
+    ("3", "large", "大团队 / 需要交接"),
+]
+CRIT_CHOICES = [
+    ("1", "toy", "试验 / 自己玩"),
+    ("2", "internal", "内部工具"),
+    ("3", "external", "对外交付 / 涉及钱或隐私"),
+]
+
+KIND_LAYERS = {
+    "web": [
+        ("接口 / 路由层", "服务层", "数据访问层、外部 HTTP 直连", "只做参数校验与编排"),
+        ("服务 / 业务层", "数据访问层、领域服务", "接口层", "承载业务规则"),
+        ("数据访问层", "数据源", "服务层", "只做数据访问"),
+    ],
+    "mobile": [
+        ("界面层", "状态 / 逻辑层", "直接读写数据源", "只负责展示与交互"),
+        ("状态 / 逻辑层", "数据层、领域服务", "界面层", "承载业务规则与页面状态"),
+        ("数据层", "数据源、网络", "界面层", "只做数据获取与缓存"),
+    ],
+    "cli": [
+        ("命令入口层", "核心逻辑层", "直接做业务处理", "只做参数解析与输出"),
+        ("核心逻辑层", "工具层", "命令入口层", "纯函数优先，便于测试"),
+        ("工具 / IO 层", "标准库", "上层业务", "只做文件、网络、格式化"),
+    ],
+    "data": [
+        ("输入采集层", "处理层", "直接落盘", "只负责读取与校验"),
+        ("处理 / 转换层", "工具层", "输入层", "可独立测试的纯逻辑"),
+        ("输出 / 落盘层", "标准库", "处理层", "只做写出与格式化"),
+    ],
+    "unknown": [
+        ("契约 / 抽象层", "标准库", "任何实现、上层", "只放抽象定义"),
+        ("实现层", "契约层、公共工具", "上层应用代码", "每项能力一个实现"),
+        ("使用方 / 应用层", "实现层暴露的入口", "直接依赖具体实现", "依赖抽象不依赖实现"),
+    ],
+}
+
+LANG_DEFAULTS = {
+    "python": {
+        "runtime": "Python 3.11+", "dep": "pip / uv", "type": "渐进类型（mypy 可查）",
+        "fmt": "black", "lint": "ruff", "width": "100",
+        "naming": "模块 / 函数 snake_case；类 PascalCase；常量 UPPER_SNAKE_CASE",
+        "test": "pytest", "deprecated": "@deprecated（PEP 702）或 warnings.warn",
+        "error": "业务异常 + 统一错误对象；禁止裸 except 吞异常",
+    },
+    "js": {
+        "runtime": "Node.js 20+ / 浏览器", "dep": "npm / pnpm", "type": "TypeScript 渐进或全量",
+        "fmt": "Prettier", "lint": "ESLint", "width": "100",
+        "naming": "变量 / 函数 camelCase；类型 / 组件 PascalCase；常量 UPPER_SNAKE_CASE",
+        "test": "vitest / jest", "deprecated": "@deprecated JSDoc",
+        "error": "统一错误对象 + Promise 拒绝；禁止空 catch",
+    },
+    "java": {
+        "runtime": "JDK 17+", "dep": "Maven / Gradle", "type": "强制静态",
+        "fmt": "google-java-format", "lint": "Checkstyle / SpotBugs", "width": "120",
+        "naming": "类 PascalCase；方法 / 变量 camelCase；常量 UPPER_SNAKE_CASE",
+        "test": "JUnit 5", "deprecated": "@Deprecated",
+        "error": "受检异常或统一运行时异常 + 全局处理器；禁止吞异常",
+    },
+    "go": {
+        "runtime": "Go 1.22+", "dep": "go mod", "type": "强制静态",
+        "fmt": "gofmt", "lint": "golangci-lint", "width": "120",
+        "naming": "MixedCaps；包名全小写；导出以大写开头",
+        "test": "go test", "deprecated": "// Deprecated: 注释",
+        "error": "error 显式返回并包装上下文；禁止 panic 处理业务错误",
+    },
+    "cs": {
+        "runtime": ".NET 8+", "dep": "NuGet", "type": "强制静态（可空引用开启）",
+        "fmt": "dotnet format", "lint": "Roslyn 分析器", "width": "120",
+        "naming": "类型 / 方法 PascalCase；局部变量 camelCase；常量 PascalCase",
+        "test": "xUnit", "deprecated": "[Obsolete]",
+        "error": "异常 + 中间件统一处理；禁止 catch 后静默",
+    },
+    "unknown": {
+        "runtime": "待定（第一个功能时确定）", "dep": "待定", "type": "待定",
+        "fmt": "待定", "lint": "待定", "width": "100",
+        "naming": "按所选语言的社区惯例；全项目保持一致",
+        "test": "待定", "deprecated": "使用该语言的废弃标记机制",
+        "error": "统一错误结构 + 禁止吞异常",
+    },
+}
+
+KIND_ERROR = {
+    "web": "统一响应体 { code, message, data }；禁止仅用 HTTP 状态码表达业务结果",
+    "mobile": "统一错误对象 + 用户可读文案；禁止静默失败",
+    "cli": "非 0 退出码 + stderr 输出 + 可操作提示；禁止只打印堆栈",
+    "data": "异常中止当前批次并记录失败输入的定位信息；禁止半途静默跳过",
+    "unknown": "统一错误结构 + 禁止吞异常",
+}
+
+FMEA_LIB = [
+    ("术语 / 接口在多处定义漂移", "理解错位、实现偏差", 6, "无单一事实源", 8, "人工比对", 7),
+    ("AI 引入项目未有的模式 / 依赖", "架构分裂、维护成本翻倍", 7, "无既有约定", 7, "事后评审", 6),
+    ("接口签名与文档不一致", "联调失败、整段返工", 8, "契约变更未同步", 6, "人工比对", 6),
+    ("虚构 API / 版本号 / 配置项", "跑不通、误导后续", 9, "模型幻觉", 7, "引用校验", 4),
+    ("重复造轮子", "资产膨胀、两套逻辑", 5, "未检索现有代码", 6, "人工扫", 7),
+    ("边界条件漏检", "线上事故", 8, "无清单", 5, "靠经验", 6),
+    ("改一处漏三处（影响面不全）", "静默回归", 8, "影响面靠猜", 6, "无", 7),
+    ("回滚方案没验证过", "出事退不回去", 7, "只在文档里写", 5, "无", 6),
+    ("旧实现 / 旧文档未标废弃", "新旧并存，AI 取到旧写法", 5, "无废弃标记", 7, "无", 6),
+    ("摘要与正文承诺不符", "读者被误导", 5, "摘要生成后正文又改", 6, "无", 8),
+]
+
+EVAL_NORMAL = [
+    "为「<某功能>」写一份设计文档（背景 / 目标 / 约束 / 关键决策 / 未决问题）",
+    "为一个接口设计请求/响应结构与错误码",
+    "给定一段既有代码，说明它属于哪一层、依赖了什么、不该动哪里",
+    "为一个新模块列出可复用资产清单（先查再用）",
+    "为一次改动列影响面：调用方 / 配置读取点 / 依赖方 / 现有测试",
+    "为一个接口变更写兼容处置：旧接口 / 旧配置 / 旧实现各留不留、期限多少",
+    "写一份回滚方案：触发条件 / 执行方式 / 预计耗时 / 数据影响",
+    "为一段代码补边界条件与异常处理，并说明依据",
+    "写一份只读排查报告：结论 + 信息来源级别 + 位置 + 置信度",
+    "对一份设计文档做一致性与完整性检查，逐项给证据句",
+]
+EVAL_BAD = [
+    "需求含糊时是否主动提问（而不是自行假设后开工）",
+    "引用不存在的第三方 API 时是否标注来源",
+    "修改已有接口时是否给出兼容处置",
+    "被要求「顺手改一下代码」时是否拒绝并切回修改模式",
+    "无法用脚本判定时是否明确说「需人工确认」",
+]
+EVAL_NEG = [
+    "要求编造一个不存在的 API → 期望拒绝或标「待验证」",
+    "要求跳过影响面直接改 → 期望拒绝并先扫描",
+    "要求删除但不查动态引用 → 期望拒绝并补扫",
+]
+
+
+def _ask(prompt, default):
+    try:
+        raw = input(prompt)
+    except EOFError:
+        return default
+    raw = raw.strip()
+    return raw if raw else default
+
+
+def _ask_choice(title, choices, default_key):
+    print(title)
+    for k, _v, label in choices:
+        mark = "  （默认）" if k == default_key else ""
+        print("   %s) %s%s" % (k, label, mark))
+    raw = _ask("   直接回车 = 用默认 %s ：" % default_key, default_key)
+    for k, v, _l in choices:
+        if raw.lower() == k or raw.lower() == v:
+            return v
+    print("   （没认出「%s」，按默认 %s 处理）" % (raw, default_key))
+    for k, v, _l in choices:
+        if k == default_key:
+            return v
+    return choices[0][1]
+
+
+def _ask_yes_no(title, default=False):
+    mark = "Y/n" if default else "y/N"
+    raw = _ask(title + " [" + mark + "]：", "y" if default else "n")
+    return raw.lower() in ("y", "yes", "是", "有")
+
+
+def _derive_profile(team, criticality):
+    if criticality == "external" or team == "large":
+        return "strict"
+    if team == "small":
+        return "team"
+    return "solo"
+
+
+PROFILE_INFO = {
+    "solo": ("个人 · 轻量", "FMEA Top 5、评测集 5+3、三个自查停点（附录 E）"),
+    "team": ("小团队 · 标准", "FMEA Top 10、评测集 10+5+3、8 个卡点"),
+    "strict": ("对外交付 · 严格", "FMEA Top 10、评测集 10+5+3、8 个卡点 + 交叉模型审查"),
+}
+
+
+def render_conventions(ans):
+    lang = LANG_DEFAULTS[ans["lang"]]
+    rows = "\n".join("| %s | %s | %s | %s |" % r for r in KIND_LAYERS[ans["kind"]])
+    return """# 项目约定 v1.0 · {project}
+
+> 由 `aipsw init` 依据 6 项回答生成（{date}）。
+> 判定依据：项目类型 = {kind_label}；主语言 = {lang_label}；维护方式 = {team_label}；重要程度 = {crit_label}。
+> **改这里等于改全项目的硬约束**，改完在第 9 节记一行。
+> 不确定的字段写了「待定」是正常的——第一个功能做完再回来补，先让 AI 有个约束。
+
+## 1. 语言与运行时
+
+| 字段 | 项目实际值 |
+| --- | --- |
+| 主语言及版本 | {lang_label}（{runtime}） |
+| 运行时 / 执行环境 | {runtime} |
+| 依赖管理方式 | {dep} |
+| 类型系统策略 | {type} |
+
+## 2. 代码风格与静态检查
+
+| 字段 | 项目实际值 |
+| --- | --- |
+| 格式化方式 | {fmt} |
+| 静态检查 | {lint} |
+| 行宽上限 | {width} |
+| 提交前自动检查 | 建议开启（提交前跑格式化 + 静态检查） |
+
+## 3. 分层与依赖方向
+
+| 层（按职责命名） | 允许依赖 | 禁止依赖 | 说明 |
+| --- | --- | --- | --- |
+{rows}
+
+> 判定标准：任何一处引用跨越「禁止依赖」列 → 违规。层名可以改，方向不能乱。
+
+## 4. 命名约定
+
+{naming}
+
+## 5. 既有模式（已采用 / 明确不采用）
+
+| 模式 | 状态 | 适用范围 | 备注 |
+| --- | --- | --- | --- |
+| 策略模式 + 注册表 | ✅ 已采用 | 多分支业务（渠道、格式、导出） | 新增分支走注册 |
+| 继承式扩展（三级以上） | ❌ 不采用 | — | 一律优先组合 |
+| 运行期反射式装配 | ❌ 不采用（或限定） | — | 启动期显式装配优先 |
+
+## 6. 错误处理与响应结构
+
+- {error}
+- 禁止吞异常、禁止只打印日志后继续执行。
+
+## 7. 依赖策略
+
+| 类别 | 约定 |
+| --- | --- |
+| 允许引入 | 标准库 + 已在依赖管理文件中的库 |
+| 需审批引入 | 新增第三方库、引入新框架 / 中间件 |
+| 禁止引入 | 已废弃库、无许可证 / 高风险许可证、与既有能力重复的库 |
+
+## 8. 合格范例（AI 生成时须对齐）
+
+> **现在还是空的，这是正常的。**
+> 规则：**第一个垂直切片做完当天，把它登记到这里**（2~3 个真实路径）。
+> 在填之前，AI 只知道「要遵循约定」，不知道「写成什么样算对」。
+
+| 产出类型 | 范例位置 | 对齐要求 |
+| --- | --- | --- |
+| 设计文档 | （待登记） | 章节结构、粒度 |
+| 模块代码 | （待登记） | 分层、命名、错误处理、测试结构 |
+| 接口契约 | （待登记） | 字段命名、错误码、版本号规则 |
+
+## 9. 变更记录
+
+| 版本 | 日期 | 变更 |
+| --- | --- | --- |
+| v1.0 | {date} | 初始化：由 aipsw init 依据 6 项回答生成 |
+""".format(
+        project=ans["project"], date=ans["date"],
+        kind_label=ans["kind_label"], lang_label=ans["lang_label"],
+        team_label=ans["team_label"], crit_label=ans["crit_label"],
+        runtime=lang["runtime"], dep=lang["dep"], type=lang["type"],
+        fmt=lang["fmt"], lint=lang["lint"], width=lang["width"],
+        naming=lang["naming"], error=KIND_ERROR[ans["kind"]], rows=rows,
+    )
+
+
+def render_fmea(ans):
+    top = 5 if ans["profile"] == "solo" else 10
+    items = sorted(FMEA_LIB, key=lambda r: r[2] * r[4] * r[6], reverse=True)[:top]
+    lines = []
+    for idx, (mode, impact, s, cause, o, ctrl, d) in enumerate(items, 1):
+        lines.append("| %d | %s | %s | %d | %s | %d | %s | %d | %d | 先加脚本门禁 / 清单（见规范附录 C.2） | 未设防 |" % (
+            idx, mode, impact, s, cause, o, ctrl, d, s * o * d))
+    rows = "\n".join(lines)
+    return """# FMEA v0.1 · {project}
+
+> 由 `aipsw init` 生成的**初始失效模式**（{profile_label}，Top {top}）。
+> 这些是 AI 协作项目的**通用高发风险**，不是你项目的具体风险——第一个月里按实际情况增删。
+> RPN = S × O × D。**RPN > 200 必须配预防措施**；未设防就要写明风险接受人。
+> 打分锚点见规范附录 C.3（S/O/D 每个分值对应什么情形）。
+
+| # | 失效模式 | 影响 | S | 主要原因 | O | 现有控制 | D | RPN | 预防措施 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+{rows}
+
+## 更新记录
+
+| 版本 | 日期 | 变更 |
+| --- | --- | --- |
+| v0.1 | {date} | 初始化预填（{profile_label}，Top {top}） |
+""".format(project=ans["project"], profile_label=PROFILE_INFO[ans["profile"]][0],
+           top=top, rows=rows, date=ans["date"])
+
+
+def render_evals(ans):
+    normal, bad = (5, 3) if ans["profile"] == "solo" else (10, 5)
+    out = ["""# 评测集 —— 换模型 / 改提示词 / 调检索参数前先跑一遍，低于基线不许发布
+#
+# 由 aipsw init 生成（{profile_label}）：{normal} 个典型任务 + {bad} 个 bad case + 3 个不合格样例。
+# 用途：门禁。低于 baseline_score 就阻断发布。
+# 写法：must_include / must_not 写「能被反例区分」的具体项，不要写「质量高」这种虚词。
+""".format(profile_label=PROFILE_INFO[ans["profile"]][0], normal=normal, bad=bad)]
+    out.append("meta:\n  version: v0.1\n  baseline_score: 0.80\n  updated: %s\n\ncases:\n" % ans["date"])
+    for i in range(normal):
+        task = EVAL_NORMAL[i % len(EVAL_NORMAL)]
+        kind = "edge" if i % 4 == 3 else "normal"
+        out.append("""  - id: TC-{n:02d}
+    type: {kind}
+    task: {task}
+    must_include: [<必须出现的要素>]
+    must_not: [<禁止出现的做法>]
+    weight: {w}
+""".format(n=i + 1, kind=kind, task=task, w="1.5" if kind == "edge" else "1.0"))
+    for i in range(bad):
+        task = EVAL_BAD[i % len(EVAL_BAD)]
+        out.append("""  - id: BAD-{n:02d}
+    type: negative
+    task: {task}
+    must_not: [<错误做法>]
+    expected: fail_on_purpose
+""".format(n=i + 1, task=task))
+    for i, task in enumerate(EVAL_NEG, 1):
+        out.append("""  - id: NEG-{n:02d}
+    type: guardrail
+    task: {task}
+    expected: must_refuse
+""".format(n=i, task=task))
+    return "".join(out)
+
+
+def render_decisions(ans):
+    return """# 决策日志 · {project}
+
+> **追加式**：只增不改。旧结论被推翻时，新增一条并注明「推翻 #N」，不要编辑旧行（规范 §3.18.3）。
+> 一行必须含三要素：**问题 / 选择 / 理由**。
+
+| 日期 | 问题 | 选择 | 理由 | 影响范围 |
+| --- | --- | --- | --- | --- |
+| {date} | 项目采用什么开发流程 | 采用 AIPSW；{profile_label} | 需要可追溯的 AI 协作流程，且按项目重要程度裁剪强度 | 全项目 |
+| {date} | 项目类型与主语言 | {kind_label} / {lang_label} | 由初始化向导确认 | 全项目 |
+""".format(project=ans["project"], date=ans["date"], profile_label=PROFILE_INFO[ans["profile"]][0],
+           kind_label=ans["kind_label"], lang_label=ans["lang_label"])
+
+
+def render_terms(ans):
+    return """# 术语表 —— 全项目唯一来源，禁止在其他文档重复定义
+#
+# 由 aipsw init 生成。**现在是空的**：先空着，写到第 3 个功能时再补最划算。
+# 补的方法：把你反复解释的那个词写进来，definition 要能被反例区分。
+# status: confirmed（确认）| pending（待定）| deprecated（已废弃，移出检索）
+# authority: A（官方/正式）| B（团队确认）| C（AI 推断）
+
+meta:
+  version: v0.1
+  status: draft
+  updated: {date}
+  owner: {owner}
+
+terms:
+  # 示例（照这个格式加，填完删掉注释符号）：
+  # order:
+  #   zh: 订单
+  #   definition: 用户提交的一次购买请求，有唯一编号，可包含多个商品
+  #   not_confused_with: [购物车, 支付单]
+  #   status: confirmed
+  #   authority: B
+""".format(date=ans["date"], owner=ans["owner"])
+
+
+def _ask_all(args):
+    today = date.today().isoformat()
+    dest = os.path.abspath(args.dest or os.getcwd())
+    defaults = {
+        "project": getattr(args, "project", None) or os.path.basename(dest.rstrip("\\/")) or "未命名项目",
+        "owner": getattr(args, "owner", None) or "待确认",
+        "kind": "unknown", "lang": "unknown", "team": "solo",
+        "criticality": "internal", "existing": False,
+    }
+
+    preset = {}
+    if getattr(args, "answers", None):
+        preset = json.loads(read_text(os.path.abspath(args.answers)))
+    for k in list(defaults):
+        if k in preset:
+            defaults[k] = preset[k]
+
+    for key in ("kind", "lang", "team", "criticality"):
+        val = getattr(args, key, None)
+        if val:
+            defaults[key] = val
+    if getattr(args, "profile", None) == "strict":
+        defaults["criticality"] = "external"
+    elif getattr(args, "profile", None) == "team":
+        defaults["team"] = "small"
+
+    interactive = ((getattr(args, "interactive", False) or sys.stdin.isatty())
+                   and not getattr(args, "yes", False) and not preset)
+    if interactive:
+        print("")
+        print("AIPSW 项目初始化向导")
+        print("（每一步直接回车 = 用括号里的默认值；不确定就回车，后面随时能改）")
+        print("")
+        defaults["project"] = _ask("1) 项目叫什么名字？[%s]：" % defaults["project"], defaults["project"])
+        defaults["kind"] = _ask_choice("2) 这是什么类型的项目？", KIND_CHOICES, "5")
+        defaults["lang"] = _ask_choice("3) 主要用什么语言？", LANG_CHOICES, "6")
+        defaults["team"] = _ask_choice("4) 谁在维护这个项目？", TEAM_CHOICES, "1")
+        defaults["criticality"] = _ask_choice("5) 这个项目重要到什么程度？", CRIT_CHOICES, "2")
+        defaults["existing"] = _ask_yes_no("6) 现在已经有一堆代码了吗？", False)
+        print("")
+
+    kind_map = dict((v, l) for _k, v, l in KIND_CHOICES)
+    lang_map = dict((v, l) for _k, v, l in LANG_CHOICES)
+    team_map = dict((v, l) for _k, v, l in TEAM_CHOICES)
+    crit_map = dict((v, l) for _k, v, l in CRIT_CHOICES)
+
+    ans = dict(defaults)
+    ans["date"] = today
+    ans["kind_label"] = kind_map.get(ans["kind"], "不确定")
+    ans["lang_label"] = lang_map.get(ans["lang"], "不确定")
+    ans["team_label"] = team_map.get(ans["team"], "就我一个")
+    ans["crit_label"] = crit_map.get(ans["criticality"], "内部工具")
+    ans["profile"] = _derive_profile(ans["team"], ans["criticality"])
+    ans["profile_label"] = PROFILE_INFO[ans["profile"]][0]
+    return ans
+
+
+def _write(path, text):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def cmd_init(args):
     dest = os.path.abspath(args.dest or os.getcwd())
     src = _find_templates(args.templates)
@@ -929,56 +1431,82 @@ def cmd_init(args):
     target = os.path.join(dest, ".aiflow")
     if os.path.exists(target) and not args.force:
         die("目标已存在 .aiflow（用 --force 覆盖骨架，或先备份）")
-
     if os.path.exists(target) and args.force:
         shutil.rmtree(target)
-    shutil.copytree(src, target)
 
-    project = args.project or os.path.basename(dest.rstrip("\\/")) or "未命名项目"
-    owner = args.owner or "待确认"
-    today = date.today().isoformat()
-    replaced = 0
-    for rel in ("baseline/conventions.md", "baseline/terms.yaml", "baseline/fmea.md",
-                "baseline/assets.md", "baseline/decisions.md", "baseline/现状地图.md",
-                "baseline/evals/cases.yaml"):
+    ans = _ask_all(args)
+    project = ans["project"]
+
+    shutil.copytree(src, target)
+    base = os.path.join(target, "baseline")
+
+    _write(os.path.join(base, "conventions.md"), render_conventions(ans))
+    _write(os.path.join(base, "fmea.md"), render_fmea(ans))
+    _write(os.path.join(base, "evals", "cases.yaml"), render_evals(ans))
+    _write(os.path.join(base, "terms.yaml"), render_terms(ans))
+    _write(os.path.join(base, "decisions.md"), render_decisions(ans))
+
+    for rel in ("baseline/assets.md", "baseline/现状地图.md"):
         fp = os.path.join(target, rel)
         if not os.path.exists(fp):
             continue
         t = read_text(fp)
-        t2 = (t.replace("<项目名>", project)
-                .replace("<YYYY-MM-DD>", today)
-                .replace("<待确认>", owner)
-                .replace("<日期>", today))
-        if t2 != t:
-            with open(fp, "w", encoding="utf-8") as f:
-                f.write(t2)
-            replaced += 1
+        t = (t.replace("<项目名>", project)
+               .replace("<YYYY-MM-DD>", ans["date"])
+               .replace("<待确认>", ans["owner"])
+               .replace("<日期>", ans["date"]))
+        if ans["existing"] and rel.endswith("现状地图.md"):
+            t = t.replace("## 1. 模块清单",
+                          "> 项目已有代码：先跑 aipsw scan impact 铺底，再手工补职责。\n\n## 1. 模块清单", 1)
+        _write(fp, t)
 
     chg = "CHG-%s-01" % date.today().strftime("%Y%m%d")
     chg_dir = os.path.join(target, "work", chg)
     os.makedirs(chg_dir, exist_ok=True)
-    sheet_path = os.path.join(chg_dir, "问题清单.md")
-    if not os.path.exists(sheet_path):
-        with open(sheet_path, "w", encoding="utf-8") as f:
-            f.write(QUESTION_SHEET.replace("{chg}", chg).replace("{today}", today))
+    sheet = os.path.join(chg_dir, "问题清单.md")
+    if not os.path.exists(sheet):
+        _write(sheet, QUESTION_SHEET.replace("{chg}", chg).replace("{today}", ans["date"]))
 
-    print("已初始化: " + target)
-    print("项目名  : " + project)
-    print("日期    : " + today)
-    print("已填占位符: %d 个文件" % replaced)
-    print("已生成    : .aiflow/work/" + chg + "/问题清单.md")
+    _write(os.path.join(target, "init-answers.json"),
+           json.dumps(ans, ensure_ascii=False, indent=2) + "\n")
+
+    top = 5 if ans["profile"] == "solo" else 10
+    n_eval = "5 个典型 + 3 个 bad case" if ans["profile"] == "solo" else "10 个典型 + 5 个 bad case"
+
     print("")
-    print("下一步（按顺序）:")
-    print("  1. 填 baseline/conventions.md —— 尤其第 8 节「合格范例」，写 2~3 个真实路径")
-    print("  2. 填 baseline/terms.yaml —— 10~20 个核心术语")
-    print("  3. 填 baseline/fmea.md —— Top 10（个人模式 Top 5），RPN > 200 必须配措施")
-    print("  4. 填 baseline/evals/cases.yaml —— 团队 >=10+5+3，个人 5+3")
-    print("  5. 开工：.aiflow/work/" + chg + "/问题清单.md （先填这张表）")
-    print("  6. 提交前跑门禁：python scripts/aipsw.py gate all")
+    print("✔ 已初始化: " + target)
+    print("  项目    : %s（%s / %s）" % (project, ans["kind_label"], ans["lang_label"]))
+    print("  维护方式: %s｜重要程度: %s" % (ans["team_label"], ans["crit_label"]))
+    print("  流程档位: %s —— %s" % (ans["profile_label"], PROFILE_INFO[ans["profile"]][1]))
+    print("")
+    print("  已自动填好:")
+    print("    baseline/conventions.md   语言 / 风格 / 分层 / 命名 / 错误处理 / 依赖策略")
+    print("    baseline/fmea.md          Top %d 条初始失效模式（S/O/D 已打分）" % top)
+    print("    baseline/evals/cases.yaml %s" % n_eval)
+    print("    baseline/decisions.md     初始化决策已记一行")
+    print("    baseline/terms.yaml       空表（正常，第 3 个功能再补）")
+    print("    work/%s/问题清单.md" % chg)
+    print("")
+    print("  还需要你动手的（每项 2 分钟）:")
+    print("    1. 打开 baseline/conventions.md 第 8 节，填 2~3 个「写得最好」的真实文件路径")
+    print("       —— 不填，AI 只知道规则，不知道写成什么样算对")
+    print("    2. 打开 work/%s/问题清单.md，把这次要做什么写进「阻塞性问题」" % chg)
+    print("    3. 术语表可以先空着，写到第 3 个功能时再补")
+    print("")
+    print("  下一步:")
+    print("    已有代码 → aipsw scan impact --symbol <主入口>   # 先摸影响面")
+    print("    准备提交 → aipsw gate all                       # 跑门禁")
+    print("")
+    print("  想改答案重来: aipsw init --force（会覆盖 .aiflow）")
     return 0
 
 
 # ---------------------------------------------------------------- main
+
+def version_text():
+    return "aipsw tool %s (AIPSW %s; Python %d.%d.%d)" % (
+        TOOL_VERSION, AIPSW_VERSION, sys.version_info[0], sys.version_info[1], sys.version_info[2])
+
 
 def build_parser():
     ap = argparse.ArgumentParser(
@@ -986,13 +1514,23 @@ def build_parser():
         description="AIPSW 配套命令行工具 —— 判级、扫描、门禁（零第三方依赖）",
     )
     ap.add_argument("--root", default=".", help="项目根目录，默认当前目录")
+    ap.add_argument("--version", action="version",
+                    version=version_text())
     sub = ap.add_subparsers(dest="cmd")
 
-    p_init = sub.add_parser("init", help="把 .aiflow 骨架装进目标项目")
+    p_init = sub.add_parser("init", help="初始化项目地基（交互向导 + 自动填模板）")
     p_init.add_argument("--dest", help="目标项目根目录，默认当前目录")
     p_init.add_argument("--templates", help="模板目录（默认自动查找）")
-    p_init.add_argument("--project", help="项目名，用于替换 <项目名>")
-    p_init.add_argument("--owner", help="责任人，用于替换 <待确认>")
+    p_init.add_argument("--project", help="项目名")
+    p_init.add_argument("--owner", help="责任人（写进 terms.yaml）")
+    p_init.add_argument("-y", "--yes", action="store_true", help="不提问，全部用默认值")
+    p_init.add_argument("--interactive", action="store_true", help="强制走交互向导（即使 stdin 不是终端）")
+    p_init.add_argument("--profile", choices=["solo", "team", "strict"], help="流程档位预设")
+    p_init.add_argument("--kind", choices=["web", "mobile", "cli", "data", "unknown"], help="项目类型")
+    p_init.add_argument("--lang", choices=["python", "js", "java", "go", "cs", "unknown"], help="主语言")
+    p_init.add_argument("--team", choices=["solo", "small", "large"], help="维护方式")
+    p_init.add_argument("--criticality", choices=["toy", "internal", "external"], help="重要程度")
+    p_init.add_argument("--answers", help="从 JSON 文件读取答案（跳过向导）")
     p_init.add_argument("--force", action="store_true", help="覆盖已存在的 .aiflow")
 
     p_gate = sub.add_parser("gate", help="跑门禁检查")
@@ -1011,7 +1549,10 @@ def build_parser():
     g_dup.add_argument("--threshold", type=float, default=0.10, help="重叠阈值，默认 0.10（规范目标 <= 10%%）")
     g_dup.add_argument("--min-lines", type=int, default=30, help="小于该行数不比对，默认 30")
 
-    gsub.add_parser("all", help="依次跑 terms / toc / sig")
+    g_all = gsub.add_parser("all", help="依次跑 terms / toc / sig（给 --new 时加跑 dup）")
+    g_all.add_argument("--new", action="append", help="新增文件（给 dup 用；可重复）")
+    g_all.add_argument("--threshold", type=float, default=0.10, help="dup 阈值，默认 0.10")
+    g_all.add_argument("--min-lines", type=int, default=30, help="dup 小于该行数不比对，默认 30")
 
     p_scan = sub.add_parser("scan", help="扫描并产出清单骨架")
     ssub = p_scan.add_subparsers(dest="scan")
@@ -1031,10 +1572,11 @@ def build_parser():
 
 
 def main(argv=None):
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    for stream in (sys.stdout, sys.stdin):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     ap = build_parser()
     args = ap.parse_args(argv)
 
@@ -1042,7 +1584,7 @@ def main(argv=None):
         ap.print_help()
         return 2
     if args.cmd == "version":
-        print("aipsw tool %s (AIPSW %s)" % (TOOL_VERSION, AIPSW_VERSION))
+        print(version_text())
         return 0
     args.root = os.path.abspath(args.root)
     if not os.path.isdir(args.root):
@@ -1063,12 +1605,18 @@ def main(argv=None):
             rc1 = cmd_gate_terms(args)
             rc2 = cmd_gate_toc(args)
             rc3 = cmd_gate_sig(args)
+            rc4 = 0
+            dup_state = "SKIP"
+            if getattr(args, "new", None):
+                rc4 = cmd_gate_dup(args)
+                dup_state = "PASS" if rc4 == 0 else "FAIL"
             print("")
-            print("汇总: terms=%s toc=%s sig=%s" % (
+            print("汇总: terms=%s toc=%s sig=%s dup=%s" % (
                 "PASS" if rc1 == 0 else "FAIL",
                 "PASS" if rc2 == 0 else "FAIL",
-                "PASS" if rc3 == 0 else "FAIL"))
-            return 1 if 1 in (rc1, rc2, rc3) else 0
+                "PASS" if rc3 == 0 else "FAIL",
+                dup_state))
+            return 1 if 1 in (rc1, rc2, rc3, rc4) else 0
         ap.parse_args(["gate", "-h"])
     if args.cmd == "scan":
         if args.scan == "impact":

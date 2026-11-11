@@ -11,6 +11,10 @@
 
 ## 从哪开始
 
+> **懒人路线**：在项目根目录跑 `python scripts/aipsw.py init`，回答 6 个问题（每题可直接回车），
+> 下面 1、2、4、5 项会自动填好，你只需要补第 3 项的范例路径。
+
+
 1. `baseline/conventions.md` —— **先填这个**（尤其「合格范例」一节点 2~3 个真实路径，它决定 AI 生成时的风格对齐）；
 2. `baseline/terms.yaml` —— 先定 10~20 个核心术语；
 3. `baseline/contracts/` —— 有并行前才需要冻结；

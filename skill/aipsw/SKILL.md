@@ -160,13 +160,17 @@ D1 必要性（能否改为废弃）→ D2 使用方**穷尽**（静态 / **动�
 
 | 命令 | 什么时候跑 | 通过标准 |
 | --- | --- | --- |
-| `python scripts/aipsw.py init --dest .` | 新项目开工 | 生成 `.aiflow/` 与第一份问题清单 |
-| `python scripts/aipsw.py gate toc` | 文档写完 / 提交前 | 锚点 0 失效 |
+| `python scripts/aipsw.py --version` | 装完先确认 | 打印工具 / AIPSW / Python 版本 |
+| `python scripts/aipsw.py init --dest .` | 新项目开工 | **交互向导**问 6 个问题后自动填好 conventions / fmea / 评测集 / 决策 / 问题清单；不想被问加 `-y` |
+| `python scripts/aipsw.py gate toc` | 文档写完 / 提交前 | 锚点 / 跨文件链接 0 失效 |
 | `python scripts/aipsw.py gate terms` | 改了术语表或正文 | 0 重复定义、0 废弃词残留 |
 | `python scripts/aipsw.py gate sig` | 并行前 / 合并前 | 契约里的接口在代码里都能找到 |
 | `python scripts/aipsw.py gate dup --new <文件>` | 合并前 | 重叠 ≤ 10% |
+| `python scripts/aipsw.py gate all --new <文件>` | 合并前一次性门禁 | 四门禁全过 |
 | `python scripts/aipsw.py scan impact --symbol X --key K` | 修改类开工（M1） | 产出《影响面清单》骨架 |
 | `python scripts/aipsw.py scan delete --symbol X` | 删除前（D2） | 产出《删除专项检查单》骨架 |
+
+> **装好先自检**：在 skill 根目录跑 `python scripts/aipsw.py version`，应打印 `aipsw tool 1.1.0`。脚本零依赖（Python 3.8+），所有路径按 `__file__` 相对解析，整个 `aipsw/` 目录搬到哪个宿主的 skills 目录都能直接跑；Windows 用 `scripts/aipsw.cmd`（跑 .ps1 遇执行策略拦截时，改用 .cmd 或加 `-ExecutionPolicy Bypass`）。
 
 **边界**：脚本只做机械判定。反射/SPI 动态引用、外部调用方、数据引用、语义完整性、运行时行为——**工具扫不到，必须人工补**。别把"工具跑过了"当成"检查过了"。
 
@@ -185,6 +189,9 @@ D1 必要性（能否改为废弃）→ D2 使用方**穷尽**（静态 / **动�
 | 要删东西 / 只读审计 | `references/01-完整版.md` §3.16（D1–D6）/ §3.17（S1–S7） |
 | 多子 agent 怎么分工 | `references/01-完整版.md` §3.20 + 附录 K；演示见 `references/03-演示文档.md` 场景十一 |
 | 时间紧做不完 | `references/01-完整版.md` §3.21 MR2 + 附录 K.3 |
+| **需求本身被改了** | `references/01-完整版.md` §3.22（R1–R5 + 失效盘点） |
+| FMEA 打分不一致 / 不知道该打几分 | `references/01-完整版.md` 附录 C.3（S/O/D 锚点） |
+| 上下文预算到底给多少 token | `references/01-完整版.md` §3.19.2（分母 + 绝对值表） |
 | 出问题了怎么追根因 | `references/01-完整版.md` §3.12（DMAIC）+ 附录 G |
 | 质量目标定多少 | `references/01-完整版.md` §1.8（CTQ C1–C4） |
 | 想先看完整例子 | `references/03-演示文档.md`（11 个场景，每个动作标了条款号） |
@@ -232,5 +239,5 @@ D1 必要性（能否改为废弃）→ D2 使用方**穷尽**（静态 / **动�
 
 ---
 
-> **版本**：AIPSW v1.13｜完整版 v1.13 ｜ 精简版 v1.4 ｜ 演示 v1.3 ｜ 模板包 v1.4 ｜ 工具 1.0.0
+> **版本**：AIPSW v1.14｜完整版 v1.14 ｜ 精简版 v1.4 ｜ 演示 v1.3 ｜ 模板包 v1.4 ｜ 工具 1.2.0
 > **权威来源**：项目仓库根目录的四份文档与 `scripts/aipsw.py`；`references/` 下为快照副本，若与仓库不一致以仓库为准。
